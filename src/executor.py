@@ -24,6 +24,7 @@ LOCAL_PROMPTS = {
 class AsyncAgentLegion:
     def __init__(self, gateway: AsyncGateway):
         self.gateway = gateway
+        self.trace_id = gateway.trace_id if hasattr(gateway, 'trace_id') else None
 
     async def _try_local_model(self, request: GatewayRequest, local_prompt: str = None) -> str:
         """尝试使用本地 LM Studio 模型，使用特化的 prompt"""
@@ -41,10 +42,10 @@ class AsyncAgentLegion:
                 messages=[m.model_dump() for m in messages],
                 timeout=120
             )
-            print("[Executor] Using specialized local model fallback")
+            print(f"[{self.trace_id}] [Executor] Using specialized local model fallback")
             return resp.choices[0].message.content
         except Exception as e:
-            print(f"[Local Model Error] {e}")
+            print(f"[{self.trace_id}] [Local Model Error] {e}")
             return None
 
     async def _dispatch(self, sys_prompt: str, user_input: str, domain: str = "Logic") -> str:
@@ -57,41 +58,40 @@ class AsyncAgentLegion:
             try:
                 return await self.gateway.chat_completion(req)
             except NetworkError as e:
-                print(f"[Network Error] {e}")
-                print("[Executor] 网络失败，尝试本地模型...")
+                print(f"[{self.trace_id}] [Network Error] {e}")
+                print(f"[{self.trace_id}] [Executor] 网络失败，尝试本地模型...")
                 local_prompt = LOCAL_PROMPTS.get(domain, LOCAL_THINKING_PROMPT)
                 local_output = await self._try_local_model(req, local_prompt)
                 if local_output:
                     return local_output
-                print("[Executor] 本地模型也失败，继续尝试云端...")
+                print(f"[{self.trace_id}] [Executor] 本地模型也失败，继续尝试云端...")
                 await asyncio.sleep(1)
                 continue
             except (RateLimitExceededError, NoAvailableNodesError) as e:
-                print(f"[Gateway Error] {e}")
-                print("[Executor] 无可用节点，尝试本地模型...")
+                print(f"[{self.trace_id}] [Gateway Error] {e}")
+                print(f"[{self.trace_id}] [Executor] 无可用节点，尝试本地模型...")
                 local_prompt = LOCAL_PROMPTS.get(domain, LOCAL_THINKING_PROMPT)
                 local_output = await self._try_local_model(req, local_prompt)
                 if local_output:
                     return local_output
-                print("[Executor] 本地模型也失败，继续尝试...")
+                print(f"[{self.trace_id}] [Executor] 本地模型也失败，继续尝试...")
                 await asyncio.sleep(1)
                 continue
             except GatewayError as e:
-                print(f"[Gateway Error] {e}")
+                print(f"[{self.trace_id}] [Gateway Error] {e}")
                 await asyncio.sleep(1)
                 continue
             except Exception as e:
-                print(f"[Unexpected Error] {e}")
+                print(f"[{self.trace_id}] [Unexpected Error] {e}")
                 await asyncio.sleep(1)
                 continue
 
-        # 所有尝试都失败，使用本地模型作为最后尝试
         local_prompt = LOCAL_PROMPTS.get(domain, LOCAL_THINKING_PROMPT)
         local_output = await self._try_local_model(req, local_prompt)
         if local_output:
             return local_output
 
-        raise Exception("所有模型尝试都失败")
+        raise Exception(f"[{self.trace_id}] 所有模型尝试都失败")
 
     async def run_analyst(self, user_input: str):
         return await self._dispatch(ANALYST_SYSTEM_PROMPT, user_input, "Logic")
