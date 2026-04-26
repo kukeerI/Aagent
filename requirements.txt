@@ -1,0 +1,31 @@
+# Aagent - 企业级智能体框架
+# 依赖版本
+
+# 异步框架
+aiohttp>=3.9.0
+asyncio>=3.4.3
+
+# 数据库
+aiosqlite>=0.19.0
+sqlalchemy>=2.0.0
+
+# 向量数据库
+chromadb>=0.4.0
+
+# 图数据库
+networkx>=3.0
+
+# Redis
+redis>=5.0.0
+
+# OpenAI 客户端
+openai>=1.0.0
+
+# Pydantic
+pydantic>=2.0.0
+
+# 环境变量
+python-dotenv>=1.0.0
+
+# 通用
+uuid>=1.30

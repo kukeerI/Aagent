@@ -2,7 +2,7 @@ import uuid
 import chromadb
 from chromadb.utils import embedding_functions
 import networkx as nx
-from schemas import Message
+from src.schemas import Message
 
 class UltimateMemory:
     def __init__(self, max_short_term_tokens=8000):
@@ -37,15 +37,19 @@ class UltimateMemory:
         return self.short_term_history
 
     # --- 长期经验沉淀 ---
-    def add_experience(self, task_desc: str, outcome: str):
+    def add_experience(self, task_desc: str, outcome: str, importance: float = 1.0):
         task_id = str(uuid.uuid4())
         self.collection.add(
             documents=[task_desc],
-            metadatas=[{"outcome": outcome}],
+            metadatas=[{"outcome": outcome, "importance": importance}],
             ids=[task_id]
         )
         self.graph.add_node(task_id, desc=task_desc, outcome=outcome)
         return task_id
+
+    def add_logic_dependency(self, parent_id: str, child_id: str):
+        """逻辑链条：记录'因为做了A，所以产生B'"""
+        self.graph.add_edge(parent_id, child_id)
 
     def query_related_memory(self, current_task: str) -> str:
         results = self.collection.query(query_texts=[current_task], n_results=1)
