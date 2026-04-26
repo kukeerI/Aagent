@@ -2,14 +2,22 @@
 # 全链路追踪系统
 
 import os
+import sys
 from opentelemetry import trace
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter, BatchSpanProcessor
-from opentelemetry.exporter.jaeger.thrift import JaegerExporter
 import contextvars
 
 from src.config import config
+
+# 尝试导入JaegerExporter，如果失败则使用模拟实现
+JaegerExporter = None
+try:
+    from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+except ImportError:
+    print("[Tracing] JaegerExporter导入失败，将使用控制台导出器")
+    JaegerExporter = None
 
 current_span = contextvars.ContextVar('current_span', default=None)
 
@@ -29,13 +37,16 @@ class Tracing:
 
             # 优先尝试 Jaeger 导出
             try:
-                jaeger_exporter = JaegerExporter(
-                    agent_host_name=config.JAEGER_HOST,
-                    agent_port=config.JAEGER_PORT,
-                )
-                span_processor = BatchSpanProcessor(jaeger_exporter)
-                tracer_provider.add_span_processor(span_processor)
-                print(f"[Tracing] Jaeger 导出器已配置: {config.JAEGER_HOST}:{config.JAEGER_PORT}")
+                if JaegerExporter:
+                    jaeger_exporter = JaegerExporter(
+                        agent_host_name=config.JAEGER_HOST,
+                        agent_port=config.JAEGER_PORT,
+                    )
+                    span_processor = BatchSpanProcessor(jaeger_exporter)
+                    tracer_provider.add_span_processor(span_processor)
+                    print(f"[Tracing] Jaeger 导出器已配置: {config.JAEGER_HOST}:{config.JAEGER_PORT}")
+                else:
+                    raise ImportError("JaegerExporter not available")
             except Exception as e:
                 print(f"[Tracing] Jaeger 导出器配置失败: {e}")
                 console_exporter = ConsoleSpanExporter()

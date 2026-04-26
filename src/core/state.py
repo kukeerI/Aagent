@@ -5,6 +5,8 @@ from enum import Enum
 from typing import Dict, Any, Callable, Optional, List
 import asyncio
 
+from src.core.checkpoint import CheckpointManager, Checkpoint
+
 class State(Enum):
     INIT = "init"
     ANALYZE = "analyze"
@@ -23,12 +25,25 @@ class StateNode:
 class StateMachine:
     def __init__(self):
         self.nodes = {}
+        self.checkpoint_manager = CheckpointManager()
 
     def add_node(self, node: StateNode):
         self.nodes[node.name] = node
 
-    async def run(self, context: Dict[str, Any], start_state: str = State.INIT.value) -> Dict[str, Any]:
-        current_state = start_state
+    async def run(self, context: Dict[str, Any], start_state: str = State.INIT.value, checkpoint_id: Optional[str] = None) -> Dict[str, Any]:
+        """运行状态机，支持从检查点恢复"""
+        # 如果提供了检查点ID，从检查点恢复
+        if checkpoint_id:
+            checkpoint = self.checkpoint_manager.get_checkpoint(checkpoint_id)
+            if checkpoint:
+                print(f"[StateMachine] 从检查点 {checkpoint_id} 恢复执行")
+                current_state = checkpoint.state_name
+                context = checkpoint.context
+            else:
+                print(f"[StateMachine] 检查点 {checkpoint_id} 不存在，从初始状态开始")
+                current_state = start_state
+        else:
+            current_state = start_state
         
         while current_state != State.COMPLETE.value:
             if current_state not in self.nodes:
@@ -37,6 +52,10 @@ class StateMachine:
             
             node = self.nodes[current_state]
             try:
+                # 创建检查点
+                checkpoint = self.checkpoint_manager.create_checkpoint(current_state, context)
+                print(f"[StateMachine] 创建检查点 {checkpoint.checkpoint_id} 用于状态 {current_state}")
+                
                 # 执行状态处理函数
                 transition_key, context = await node.handler(context)
                 
@@ -49,7 +68,31 @@ class StateMachine:
                 context["error"] = str(e)
                 current_state = State.ERROR.value
         
+        # 清理检查点
+        trace_id = context.get("trace_id")
+        if trace_id:
+            deleted = self.checkpoint_manager.delete_checkpoints_by_trace_id(trace_id)
+            print(f"[StateMachine] 清理了 {deleted} 个检查点")
+        
         return context
+
+    async def pause(self, context: Dict[str, Any], current_state: str) -> str:
+        """暂停执行，创建检查点"""
+        checkpoint = self.checkpoint_manager.create_checkpoint(current_state, context)
+        print(f"[StateMachine] 执行已暂停，创建检查点 {checkpoint.checkpoint_id}")
+        return checkpoint.checkpoint_id
+
+    def list_checkpoints(self, trace_id: str) -> List[Checkpoint]:
+        """列出指定trace_id的所有检查点"""
+        return self.checkpoint_manager.list_checkpoints(trace_id)
+
+    def get_checkpoint(self, checkpoint_id: str) -> Optional[Checkpoint]:
+        """获取检查点"""
+        return self.checkpoint_manager.get_checkpoint(checkpoint_id)
+
+    def delete_checkpoint(self, checkpoint_id: str) -> bool:
+        """删除检查点"""
+        return self.checkpoint_manager.delete_checkpoint(checkpoint_id)
 
 class AgentStateMachine(StateMachine):
     def __init__(self, orchestrator):
@@ -109,6 +152,9 @@ class AgentStateMachine(StateMachine):
 
     async def _init_handler(self, context: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         user_input = context.get("user_input", "")
+        # 确保context中有trace_id
+        if "trace_id" not in context:
+            context["trace_id"] = getattr(self.orchestrator, "trace_id", "unknown")
         
         # 简单的任务类型判断
         if any(keyword in user_input.lower() for keyword in ["代码", "编程", "function", "python"]):

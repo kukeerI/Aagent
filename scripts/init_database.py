@@ -3,7 +3,13 @@
 # 需要先运行: pip install aiosqlite
 
 import asyncio
-from src.database import AsyncSessionLocal, APIAsset, init_db
+import sys
+import os
+
+# 添加项目根目录到 Python 路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.data.database import AsyncSessionLocal, APIAsset, init_db
 
 async def init_api_assets():
     # 1. 初始化数据库表
@@ -14,28 +20,22 @@ async def init_api_assets():
     # 使用 DeepSeek 作为默认 provider
     assets_data = [
         {
-            "provider": "deepseek",
             "model_name": "deepseek-chat",
-            "domain_skill": "Logic",
-            "rpm_limit": 60,
+            "base_url": "https://api.deepseek.com/v1",
             "api_key": "DEEPSEEK_API_KEY",
-            "provider_url": "https://api.deepseek.com/v1",
+            "weight": 100,
         },
         {
-            "provider": "deepseek",
-            "model_name": "deepseek-chat",
-            "domain_skill": "Coding",
-            "rpm_limit": 60,
+            "model_name": "gemma-3-12b-it",
+            "base_url": "https://api.deepseek.com/v1",
             "api_key": "DEEPSEEK_API_KEY",
-            "provider_url": "https://api.deepseek.com/v1",
+            "weight": 80,
         },
         {
-            "provider": "deepseek",
-            "model_name": "deepseek-chat",
-            "domain_skill": "Fast",
-            "rpm_limit": 120,
+            "model_name": "llama3-70b",
+            "base_url": "https://api.deepseek.com/v1",
             "api_key": "DEEPSEEK_API_KEY",
-            "provider_url": "https://api.deepseek.com/v1",
+            "weight": 90,
         },
     ]
 

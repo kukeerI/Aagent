@@ -1,100 +1,129 @@
-#!/usr/bin/env python3
-# scripts/comprehensive_test.py
-import os
-import sys
+# comprehensive_test.py - 饱和测试脚本
+# 测试系统在高负载下的稳定性
+
 import asyncio
 import time
+import concurrent.futures
+import sys
+import os
+from typing import List, Dict, Any
 
 # 添加项目根目录到 Python 路径
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.orchestrator import AsyncRealOrchestrator
+from src.core.orchestrator import AsyncRealOrchestrator
+from src.data.memory import Memory
 
-async def test_docker_sandbox():
-    """测试 Docker 容器化沙箱"""
-    print("\n=== 测试 Docker 容器化沙箱 ===")
-    orchestrator = AsyncRealOrchestrator()
+async def test_memory_performance():
+    """测试记忆系统性能"""
+    print("=== 测试记忆系统性能 ===")
+    memory = Memory()
     
-    # 测试简单代码执行
-    code = "result = 1 + 1"
-    output = await orchestrator.sandbox.execute_code(code)
-    print(f"简单代码执行: {output}")
-    
-    # 测试耗时较长的代码（应该被超时限制）
-    code = "import time; time.sleep(15); result = '超时测试'"
-    output = await orchestrator.sandbox.execute_code(code)
-    print(f"超时测试: {output}")
-    
-    # 测试复杂代码
-    code = """
-result = []
-for i in range(10):
-    result.append(i * i)
-result
-"""
-    output = await orchestrator.sandbox.execute_code(code)
-    print(f"复杂代码执行: {output}")
-
-async def test_state_machine():
-    """测试状态机编排"""
-    print("\n=== 测试状态机编排 ===")
-    orchestrator = AsyncRealOrchestrator()
-    
-    # 测试分析 -> 执行流程
-    result = await orchestrator.start_work("写一个简单的 Python 函数，计算斐波那契数列的第 10 项")
-    print("状态机测试完成")
-
-async def test_semantic_cache():
-    """测试语义缓存"""
-    print("\n=== 测试语义缓存 ===")
-    orchestrator = AsyncRealOrchestrator()
-    
-    # 第一次请求（应该触发 API 调用）
+    # 测试添加大量经验
     start_time = time.time()
-    await orchestrator.start_work("什么是 Python 装饰器？")
-    first_time = time.time() - start_time
-    print(f"第一次请求耗时: {first_time:.2f} 秒")
+    for i in range(100):
+        await memory.add_experience(f"测试输入 {i}", f"测试响应 {i}")
+    end_time = time.time()
+    print(f"添加 100 条经验耗时: {end_time - start_time:.2f} 秒")
     
-    # 第二次请求（应该命中缓存）
+    # 测试检索性能
     start_time = time.time()
-    await orchestrator.start_work("Python 装饰器的作用是什么？")
-    second_time = time.time() - start_time
-    print(f"第二次请求耗时: {second_time:.2f} 秒")
+    for i in range(10):
+        result = await memory.retrieve(f"测试 {i}")
+    end_time = time.time()
+    print(f"检索 10 次耗时: {end_time - start_time:.2f} 秒")
     
-    if second_time < first_time * 0.5:
-        print("[OK] 语义缓存工作正常")
-    else:
-        print("[ERROR] 语义缓存可能未生效")
+    # 测试知识图谱性能
+    start_time = time.time()
+    graph = await memory.get_knowledge_graph()
+    end_time = time.time()
+    print(f"获取知识图谱耗时: {end_time - start_time:.2f} 秒")
+    print(f"知识图谱节点数: {len(graph['nodes'])}, 边数: {len(graph['edges'])}")
 
-async def test_complete_workflow():
-    """测试完整工作流"""
-    print("\n=== 测试完整工作流 ===")
+async def test_orchestrator_performance():
+    """测试编排器性能"""
+    print("\n=== 测试编排器性能 ===")
+    
+    # 测试单任务执行
+    orchestrator = AsyncRealOrchestrator()
+    start_time = time.time()
+    result = await orchestrator.start_work("编写一个简单的Python函数，计算斐波那契数列")
+    end_time = time.time()
+    print(f"单任务执行耗时: {end_time - start_time:.2f} 秒")
+    print(f"任务结果长度: {len(result)}")
+
+async def test_concurrent_tasks():
+    """测试并发任务处理"""
+    print("\n=== 测试并发任务处理 ===")
+    
+    tasks = [
+        "编写一个Python函数，计算阶乘",
+        "编写一个Python函数，计算平方和",
+        "编写一个Python函数，判断素数",
+        "编写一个Python函数，反转字符串",
+        "编写一个Python函数，计算最大公约数"
+    ]
+    
+    start_time = time.time()
+    orchestrators = [AsyncRealOrchestrator() for _ in tasks]
+    results = await asyncio.gather(
+        *[orchestrator.start_work(task) for orchestrator, task in zip(orchestrators, tasks)]
+    )
+    end_time = time.time()
+    print(f"并发执行 {len(tasks)} 个任务耗时: {end_time - start_time:.2f} 秒")
+    print(f"所有任务都完成: {all(len(result) > 0 for result in results)}")
+
+async def test_checkpoint_performance():
+    """测试检查点性能"""
+    print("\n=== 测试检查点性能 ===")
+    
     orchestrator = AsyncRealOrchestrator()
     
-    # 测试代码生成任务
-    print("\n测试 1: 代码生成任务")
-    await orchestrator.start_work("写一个 Python 函数，实现快速排序算法")
+    # 运行任务并创建检查点
+    start_time = time.time()
+    result = await orchestrator.start_work("编写一个复杂的Python函数，实现二分查找")
+    end_time = time.time()
+    print(f"任务执行耗时: {end_time - start_time:.2f} 秒")
     
-    # 测试分析任务
-    print("\n测试 2: 分析任务")
-    await orchestrator.start_work("分析 Python 中列表推导式的优缺点")
+    # 列出检查点
+    checkpoints = orchestrator.list_checkpoints()
+    print(f"创建的检查点数: {len(checkpoints)}")
     
-    # 测试创意任务
-    print("\n测试 3: 创意任务")
-    await orchestrator.start_work("为一个在线学习平台设计 5 个功能模块")
+    if checkpoints:
+        # 测试从检查点恢复
+        checkpoint_id = checkpoints[0]['checkpoint_id']
+        start_time = time.time()
+        resume_result = await orchestrator.resume_work(checkpoint_id)
+        end_time = time.time()
+        print(f"从检查点恢复耗时: {end_time - start_time:.2f} 秒")
+        print(f"恢复结果长度: {len(resume_result)}")
+
+async def test_memory_persistence():
+    """测试记忆持久性"""
+    print("\n=== 测试记忆持久性 ===")
+    
+    # 创建第一个记忆系统并添加经验
+    memory1 = Memory()
+    for i in range(50):
+        await memory1.add_experience(f"持久化测试输入 {i}", f"持久化测试响应 {i}")
+    
+    # 创建第二个记忆系统，验证记忆是否共享
+    memory2 = Memory()
+    result = await memory2.retrieve("持久化测试")
+    print(f"从新记忆系统检索到的结果数: {len(result) if result else 0}")
 
 async def main():
     """主测试函数"""
-    print("开始综合测试...")
+    print("开始执行饱和测试...")
     
-    try:
-        await test_docker_sandbox()
-        await test_state_machine()
-        await test_semantic_cache()
-        await test_complete_workflow()
-        print("\n[SUCCESS] 所有测试完成！")
-    except Exception as e:
-        print(f"\n[ERROR] 测试失败: {e}")
+    # 运行所有测试
+    await test_memory_performance()
+    await test_orchestrator_performance()
+    await test_concurrent_tasks()
+    await test_checkpoint_performance()
+    await test_memory_persistence()
+    
+    print("\n饱和测试完成！")
 
 if __name__ == "__main__":
     asyncio.run(main())

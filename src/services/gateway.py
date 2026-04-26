@@ -12,6 +12,7 @@ from src.services.semantic_cache import SemanticCache
 from src.services.tracing import tracing
 from src.data.database import AsyncSessionLocal, APIAsset
 from src.config import config
+from src.services.llmops.langfuse import langfuse_integration
 
 class GatewayRequest:
     def __init__(self, model: str, messages: List[Dict[str, str]], domain_skill: str):
@@ -32,6 +33,20 @@ class AsyncGateway:
         self.semantic_cache = SemanticCache()
         self.r = None
         self.redis_initialized = False
+        self.prompts = {
+            "default": "你是一个专业的AI助手，能够提供准确、清晰的回答。",
+            "code": "你是一个专业的编程助手，能够提供高质量的代码和解释。",
+            "analysis": "你是一个专业的分析助手，能够提供深入、全面的分析。",
+            "research": "你是一个专业的研究助手，能够提供准确、全面的研究结果。",
+            "creative": "你是一个创意助手，能够提供原创、有趣的内容。"
+        }
+        self.prompt_versions = {
+            "default": "1.0.0",
+            "code": "1.0.0",
+            "analysis": "1.0.0",
+            "research": "1.0.0",
+            "creative": "1.0.0"
+        }
 
     async def chat_completion(self, model: str, messages: List[Dict[str, str]], domain_skill: str) -> str:
         with tracing.start_span("gateway.chat_completion", attributes={
@@ -51,7 +66,9 @@ class AsyncGateway:
             with tracing.start_span("gateway.get_best_node"):
                 node = await self.get_best_node(domain_skill)
                 if not node:
-                    return await self._try_local_model(messages)
+                    response = await self._try_local_model(messages)
+                    self._trace_prompt_usage(domain_skill, messages, response)
+                    return response
 
             # 尝试请求
             max_attempts = config.MAX_RETRY_ATTEMPTS
@@ -65,13 +82,17 @@ class AsyncGateway:
                         response = await self._make_request(node, messages)
                         # 设置缓存
                         await self.semantic_cache.set(request.model_dump(), response)
+                        # 追踪Prompt使用情况
+                        self._trace_prompt_usage(domain_skill, messages, response)
                         return response
                     except Exception as e:
                         print(f"[Gateway] 请求失败 (尝试 {attempt+1}/{max_attempts}): {e}")
                         await asyncio.sleep(config.RETRY_DELAY)
 
             # 所有尝试都失败，使用本地模型
-            return await self._try_local_model(messages)
+            response = await self._try_local_model(messages)
+            self._trace_prompt_usage(domain_skill, messages, response)
+            return response
 
     async def get_best_node(self, domain_skill: str) -> Optional[Dict[str, Any]]:
         try:
@@ -159,3 +180,82 @@ class AsyncGateway:
         except Exception as e:
             print(f"[Local Model Error] {e}")
             return "所有模型都不可用，请稍后重试。"
+
+    def _trace_prompt_usage(self, domain_skill: str, messages: List[Dict[str, str]], response: str):
+        """追踪Prompt使用情况"""
+        # 提取系统提示
+        system_prompt = next((msg['content'] for msg in messages if msg['role'] == 'system'), self.get_prompt(domain_skill))
+        # 提取用户输入
+        user_input = next((msg['content'] for msg in messages if msg['role'] == 'user'), "")
+        
+        # 构建完整输入
+        input_text = f"System: {system_prompt}\nUser: {user_input}"
+        
+        # 追踪到Langfuse
+        langfuse_integration.trace_prompt(
+            prompt_name=domain_skill,
+            prompt_version=self.prompt_versions.get(domain_skill, "1.0.0"),
+            input_text=input_text,
+            output_text=response,
+            metadata={"model": "unknown"}
+        )
+
+    def get_prompt(self, domain_skill: str = "default") -> str:
+        """获取Prompt"""
+        # 尝试从Langfuse获取最新版本的Prompt
+        langfuse_prompt = langfuse_integration.get_prompt(domain_skill)
+        if langfuse_prompt:
+            return langfuse_prompt.prompt
+        # 回退到本地Prompt
+        return self.prompts.get(domain_skill, self.prompts["default"])
+
+    def set_prompt(self, domain_skill: str, prompt: str, version: str = "1.0.0"):
+        """设置Prompt"""
+        self.prompts[domain_skill] = prompt
+        self.prompt_versions[domain_skill] = version
+        # 同步到Langfuse
+        langfuse_integration.create_prompt(
+            name=domain_skill,
+            content=prompt,
+            version=version
+        )
+
+    def list_prompts(self) -> Dict[str, str]:
+        """列出所有Prompt"""
+        # 从Langfuse获取Prompt列表
+        langfuse_prompts = langfuse_integration.list_prompts()
+        if langfuse_prompts:
+            return {prompt: "1.0.0" for prompt in langfuse_prompts}  # 简化处理
+        # 回退到本地Prompt
+        return self.prompts
+
+    async def a_b_test_prompts(self, domain_skill: str, variants: List[str], test_inputs: List[str]) -> Dict[str, float]:
+        """A/B测试Prompt"""
+        results = {}
+        
+        for i, variant in enumerate(variants):
+            # 临时设置Prompt
+            original_prompt = self.prompts.get(domain_skill)
+            self.prompts[domain_skill] = variant
+            
+            # 测试每个输入
+            scores = []
+            for test_input in test_inputs:
+                messages = [
+                    {"role": "system", "content": variant},
+                    {"role": "user", "content": test_input}
+                ]
+                response = await self.chat_completion("local-model", messages, domain_skill)
+                # 简单的评分机制（实际应用中可以使用更复杂的评估方法）
+                score = len(response) / 100  # 示例：基于响应长度的评分
+                scores.append(score)
+            
+            # 计算平均得分
+            average_score = sum(scores) / len(scores)
+            results[f"variant_{i+1}"] = average_score
+            
+            # 恢复原始Prompt
+            if original_prompt:
+                self.prompts[domain_skill] = original_prompt
+        
+        return results

@@ -1,224 +1,238 @@
-# Aagent - 企业级智能体框架
+# Aagent V6.0 企业级多智能体网关
 
-Aagent 是一个高性能、可扩展的企业级智能体框架，专为复杂任务的自动化处理而设计。它采用模块化架构，支持多模型联邦、本地/云端双轨降级、全链路追踪等企业级特性。
+Aagent是一个面向企业级生产环境的LLM原生高并发网关与多智能体编排操作系统。
 
 ## 核心特性
 
-- **模块化架构**：清晰的目录结构，便于维护和扩展
-- **多模型联邦**：支持多种大语言模型，智能路由和负载均衡
-- **本地/云端双轨降级**：网络不稳定时自动切换到本地模型
-- **全链路追踪**：集成 OpenTelemetry，支持 Jaeger 导出
-- **语义缓存**：基于 Redis 的语义级缓存，提升响应速度
-- **安全沙箱**：Docker 容器隔离执行环境，防止资源耗尽攻击
-- **记忆系统**：短期记忆 + 长期记忆 + 逻辑依赖图
-- **实时监控**：Prometheus 指标集成，提供详细的运行状态
+### 四大核心引擎
+- **智能网关 (Intelligent Gateway)**：内置Redis Lua限流、语义缓存、跨厂商协议抹平与异构模型负载均衡。支持断网自动降级至本地LM Studio算力。
+- **确定性图编排 (Deterministic Orchestrator)**：基于状态机的并发Maker-Checker对抗网络，确保输出的绝对确定性和强类型契约。
+- **双核执行沙箱 (Dual-Core Sandbox)**：兼具轻量级无服务器AST动态解析，与工业级隔离的Docker容器化代码执行底座。
+- **全栈可观测性 (Full-Stack Observability)**：原生集成Prometheus监控、全局Trace ID链路追踪，以及详尽的执行日志飞轮。
+
+### 新功能
+1. **MCP协议支持**：接入标准的Model Context Protocol，可直接挂载全球开发者写好的成千上万个工具。
+2. **Checkpointer和Time Travel**：支持任务中断、恢复和人工干预，实现状态的持久化和时光倒流。
+3. **GraphRAG记忆系统**：从向量存储升级到基于实体和关系的知识图谱，实现更智能的记忆检索。
+4. **LLMOps增强**：支持Prompt的A/B测试、版本管理，以及与Langfuse的集成，实现可视化的Prompt调优。
 
 ## 目录结构
 
 ```
-src/
-├── api/           # Web API 服务
-├── core/          # 核心逻辑
-├── data/          # 数据层
-├── services/      # 服务层
-│   ├── sandbox/   # 沙箱执行环境
-│   ├── gateway/   # 模型网关
-│   ├── tracing/   # 全链路追踪
-│   └── semantic_cache/ # 语义缓存
-├── utils/         # 工具函数
-└── config.py      # 配置管理
+Aagent/
+├── src/
+│   ├── api/             # API接入层
+│   ├── core/            # 核心服务群
+│   │   ├── checkpoint.py # 检查点管理
+│   │   ├── executor.py   # 执行器
+│   │   ├── orchestrator.py # 编排器
+│   │   └── state.py      # 状态机
+│   ├── data/            # 数据与记忆底座
+│   │   ├── database.py   # 数据库
+│   │   └── memory.py     # 记忆系统（GraphRAG）
+│   ├── services/        # 服务层
+│   │   ├── gateway.py    # 智能网关
+│   │   ├── llmops/       # LLMOps功能
+│   │   │   └── langfuse.py # Langfuse集成
+│   │   ├── mcp/          # MCP协议支持
+│   │   │   └── client.py # MCP客户端
+│   │   ├── sandbox/      # 沙箱执行
+│   │   ├── semantic_cache.py # 语义缓存
+│   │   └── tracing.py    # 全链路追踪
+│   ├── config.py         # 配置管理
+│   └── utils/            # 工具函数
+├── test_features.py      # 功能测试
+├── docker-compose.yml    # Docker编排
+├── prometheus.yml        # Prometheus配置
+└── README.md             # 项目文档
 ```
 
 ## 安装
 
-### 1. 克隆仓库
+### 环境要求
+- Python 3.8+
+- Redis
+- Docker (可选，用于沙箱执行)
+- LM Studio (可选，用于本地模型)
 
-```bash
-git clone https://github.com/yourusername/aagent.git
-cd aagent
-```
-
-### 2. 安装依赖
+### 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. 配置环境变量
+### 环境变量配置
 
-创建 `.env` 文件，配置以下环境变量：
-
-```env
-# API 配置
+```bash
+# 服务配置
 API_HOST=0.0.0.0
 API_PORT=8000
 
-# 模型配置
-LM_STUDIO_URL=http://localhost:1234/v1
+# 监控配置
+JAEGER_HOST=localhost
+JAEGER_PORT=6831
 
 # 存储配置
 REDIS_URL=redis://localhost:6379/0
 DATABASE_URL=sqlite+aiosqlite:///./agent_data.db
+
+# 模型配置
+LM_STUDIO_URL=http://localhost:1234/v1
 
 # 沙箱配置
 DOCKER_ENABLED=True
 SANDBOX_TIMEOUT=10
 SANDBOX_MEMORY_LIMIT=512m
 
-# 监控配置
-JAEGER_HOST=localhost
-JAEGER_PORT=6831
+# 语义缓存配置
+CACHE_THRESHOLD=0.95
+CACHE_EXPIRY=3600
 
-# 日志配置
-LOG_LEVEL=INFO
-```
+# 记忆系统配置
+MAX_SHORT_TERM_MEMORY=100
 
-### 4. 启动服务
+# Langfuse配置（可选）
+LANGFUSE_PUBLIC_KEY=your_public_key
+LANGFUSE_SECRET_KEY=your_secret_key
+LANGFUSE_HOST=https://cloud.langfuse.com
 
-```bash
-python -m src.api.main
+# MCP服务器配置（可选）
+MCP_SERVER_URL=http://localhost:8000
 ```
 
 ## 快速开始
 
-### 1. 基本使用
+### 启动服务
+
+```bash
+# 启动Redis
+redis-server
+
+# 启动LM Studio（可选）
+# 下载并安装LM Studio，启动本地模型服务
+
+# 启动Aagent
+python -m src.api.main
+```
+
+### 使用示例
 
 ```python
 from src.core.orchestrator import AsyncRealOrchestrator
+import asyncio
 
 async def main():
-    # 创建编排器实例
+    # 创建编排器
     orchestrator = AsyncRealOrchestrator()
     
-    # 执行任务
-    await orchestrator.start_work("帮我分析一下当前市场趋势")
+    # 运行任务
+    result = await orchestrator.start_work("编写一个简单的Python函数")
+    print(result)
+    
+    # 列出检查点
+    checkpoints = orchestrator.list_checkpoints()
+    print(checkpoints)
+    
+    # 时光倒流（如果有检查点）
+    if checkpoints:
+        checkpoint_id = checkpoints[0]["checkpoint_id"]
+        result = await orchestrator.time_travel(checkpoint_id)
+        print(result)
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
 ```
 
-### 2. API 调用
+## 核心功能
 
-```bash
-curl -X POST http://localhost:8000/task \
-  -H "Content-Type: application/json" \
-  -d '{"task": "帮我生成一个Python函数，计算斐波那契数列"}'
+### MCP协议支持
+
+Aagent支持标准的Model Context Protocol，可直接接入外部MCP服务器，使用全球开发者提供的工具。
+
+```python
+# 创建带有MCP支持的编排器
+orchestrator = AsyncRealOrchestrator(mcp_server_url="http://localhost:8000")
 ```
 
-### 3. 查看执行结果
+### 状态机与检查点
 
-```bash
-curl http://localhost:8000/task/{trace_id}
-```
+Aagent实现了基于状态机的编排系统，支持任务的暂停、恢复和时光倒流。
 
-## 配置管理
+- **暂停任务**：创建检查点，保存当前执行状态
+- **恢复任务**：从检查点恢复执行
+- **时光倒流**：从指定检查点重新执行
 
-Aagent 使用集中式配置管理，所有配置项都可以通过环境变量或 `src/config.py` 文件进行调整。
+### GraphRAG记忆系统
 
-### 主要配置项
+Aagent的记忆系统已升级为GraphRAG，能够：
+- 从文本中提取实体和关系
+- 构建知识图谱
+- 基于图进行智能检索
+- 支持跨会话的深度理解
 
-- `API_HOST`：API 服务监听地址
-- `API_PORT`：API 服务监听端口
-- `LM_STUDIO_URL`：本地模型服务地址
-- `REDIS_URL`：Redis 连接地址
-- `DATABASE_URL`：数据库连接地址
-- `DOCKER_ENABLED`：是否启用 Docker 沙箱
-- `SANDBOX_TIMEOUT`：沙箱执行超时时间（秒）
-- `JAEGER_HOST`：Jaeger 追踪服务地址
-- `JAEGER_PORT`：Jaeger 追踪服务端口
+### LLMOps功能
+
+Aagent提供了完善的LLMOps功能：
+- Prompt管理：创建、更新、列出Prompt
+- A/B测试：比较不同Prompt的效果
+- 版本管理：追踪Prompt的版本变化
+- Langfuse集成：实现可视化的Prompt调优
 
 ## 监控与可观测性
 
-### 1. 指标端点
+### 全链路追踪
 
-- `/metrics`：Prometheus 指标
-- `/stats`：系统统计信息
-- `/health`：健康检查
+Aagent集成了OpenTelemetry，支持：
+- 全局Trace ID贯穿始终
+- 详细的Span记录
+- 与Jaeger的集成
 
-### 2. 全链路追踪
+### 监控指标
 
-Aagent 集成了 OpenTelemetry，可以将追踪数据导出到 Jaeger：
-
-1. 启动 Jaeger 服务：
-   ```bash
-docker run -d --name jaeger -p 6831:6831/udp -p 16686:16686 jaegertracing/all-in-one:latest
-   ```
-
-2. 访问 Jaeger UI：
-   ```
-   http://localhost:16686
-   ```
-
-## 沙箱执行
-
-Aagent 支持两种沙箱执行模式：
-
-1. **Docker 沙箱**：使用 Docker 容器隔离执行环境，提供最强的安全性
-2. **AST 沙箱**：基于 AST 解析的沙箱，作为 Docker 不可用时的 fallback
-
-## 语义缓存
-
-Aagent 集成了基于 Redis 的语义缓存，可以：
-- 缓存相似查询的结果，提升响应速度
-- 减少重复请求，节省模型调用成本
-- 支持域隔离，不同领域的缓存相互独立
-
-## 记忆系统
-
-Aagent 的记忆系统包含三个层次：
-
-1. **短期记忆**：滑动窗口，存储最近的交互
-2. **长期记忆**：持久化存储，存储重要的交互
-3. **逻辑依赖图**：记录任务间的逻辑关系，支持因果推理
+Aagent提供了丰富的监控指标：
+- llm_request_latency_seconds：各模型响应延迟
+- gateway_cache_hit_ratio：语义缓存命中率
+- token_consumption_total：基于租户/模型的Token消耗
+- sandbox_execution_timeouts：沙箱超时拦截率
 
 ## 开发指南
 
-### 1. 添加新服务
+### 扩展MCP工具
 
-在 `src/services/` 目录下创建新的服务模块，然后在需要的地方导入使用。
+1. 创建MCP服务器，实现工具接口
+2. 在Aagent中配置MCP服务器URL
+3. Aagent会自动发现并使用这些工具
 
-### 2. 扩展模型支持
+### 自定义Prompt
 
-在 `src/services/gateway.py` 中添加新的模型配置，支持更多的大语言模型。
+```python
+# 设置自定义Prompt
+gateway = AsyncGateway()
+gateway.set_prompt("code", "你是一个专业的Python编程助手，能够提供高质量的代码和详细的解释。", "2.0.0")
 
-### 3. 自定义沙箱
-
-在 `src/services/sandbox/` 目录下创建新的沙箱实现，实现 `execute_code` 方法。
-
-## 测试
-
-### 运行单元测试
-
-```bash
-python -m pytest tests/
+# A/B测试Prompt
+variants = [
+    "你是一个专业的Python编程助手",
+    "你是一个经验丰富的Python开发者"
+]
+test_inputs = ["编写一个排序函数", "如何实现装饰器"]
+results = await gateway.a_b_test_prompts("code", variants, test_inputs)
+print(results)
 ```
 
-### 运行性能测试
+### 贡献代码
 
-```bash
-python tests/test_model_performance.py --model gemma
-python tests/test_model_performance.py --model qwen
-python tests/test_model_performance.py --compare
-```
-
-## 部署
-
-### Docker 部署
-
-```bash
-docker build -t aagent .
-docker run -p 8000:8000 --env-file .env aagent
-```
-
-### Kubernetes 部署
-
-参考 `k8s/` 目录下的部署配置文件。
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
+1. Fork仓库
+2. 创建特性分支
+3. 提交代码
+4. 运行测试
+5. 创建Pull Request
 
 ## 许可证
 
 MIT License
+
+## 联系方式
+
+- 项目地址：https://github.com/yourusername/aagent
+- 问题反馈：https://github.com/yourusername/aagent/issues
