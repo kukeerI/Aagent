@@ -19,6 +19,7 @@ from src.services.gateway import AsyncGateway
 from src.services.sandbox.docker import DockerSandbox
 from src.services.tracing import tracing
 from src.config import config
+from src.core.intent_analyzer import IntentAnalyzer
 
 class AsyncRealOrchestrator:
     def __init__(self, trace_id: str = None, mcp_server_url: Optional[str] = None):
@@ -527,6 +528,113 @@ class AsyncRealOrchestrator:
         print(f"[Aagent 评审系统] ========================================")
         
         return final_answer, need_human_intervention
+
+    async def run_dynamic_reasoning(self, task: str, model_pool: List[Dict[str, Any]]) -> str:
+        """执行动态推理流
+        
+        Args:
+            task: 任务描述
+            model_pool: 模型池
+            
+        Returns:
+            推理结果
+        """
+        with tracing.start_span("orchestrator.run_dynamic_reasoning", attributes={
+            "task": task[:100],
+            "model_count": len(model_pool)
+        }) as span:
+            print(f"\n[{self.trace_id}] ========================================")
+            print(f"[{self.trace_id}] 开始动态推理流")
+            print(f"[{self.trace_id}] ========================================")
+            
+            # 分类任务类型
+            task_type = IntentAnalyzer.classify_task_type(task)
+            print(f"[{self.trace_id}] 任务类型: {task_type}")
+            
+            # 根据任务类型选择推理策略
+            if task_type == "Tool/Code":
+                result = await self._run_react_loop(task, model_pool)
+            elif task_type == "Logic/Math":
+                result = await self._run_plan_and_solve(task, model_pool)
+            else:  # Writing/Design
+                result = await self._run_reflexion(task, model_pool)
+            
+            print(f"\n[{self.trace_id}] ========================================")
+            print(f"[{self.trace_id}] 动态推理流完成")
+            print(f"[{self.trace_id}] ========================================")
+            
+            return result
+    
+    async def _run_react_loop(self, task: str, model_pool: List[Dict[str, Any]]) -> str:
+        """运行 ReAct 循环（工具/代码类任务）"""
+        print(f"[{self.trace_id}] 采用 ReAct Loop 策略")
+        
+        # 构建 ReAct 提示
+        react_prompt = f"""你是一个解决问题的专家，采用 ReAct 模式：思考 -> 行动 -> 观察 -> 修正。
+        
+        任务：{task}
+        
+        请按照以下格式输出：
+        
+        思考：[你的思考过程]
+        行动：[你要执行的代码或操作]
+        观察：[执行结果]
+        修正：[根据观察结果的修正]
+        
+        重复这个过程，直到问题解决。
+        """
+        
+        messages = [
+            {"role": "system", "content": "你是一个解决问题的专家，擅长使用 ReAct 模式解决工具和代码相关问题。"},
+            {"role": "user", "content": react_prompt}
+        ]
+        
+        # 选择合适的模型
+        model = self._select_model(model_pool, task_type="Tool/Code")
+        
+        try:
+            response = await self.gateway.chat_completion(
+                model=model["model_name"],
+                messages=messages,
+                domain_skill="CodeExecution"
+            )
+            
+            # 提取行动部分并执行
+            import re
+            action_match = re.search(r"行动：(.*?)(?=观察：|修正：|$)", response)
+            if action_match:
+                code = action_match.group(1).strip()
+                if code:
+                    print(f"[{self.trace_id}] 执行代码:")
+                    print(code)
+                    execution_result = await self._safe_execute_code(code)
+                    print(f"[{self.trace_id}] 执行结果: {execution_result}")
+                    
+                    # 基于执行结果生成最终答案
+                    final_prompt = f"""基于以下执行结果，生成最终答案：
+                    
+                    任务：{task}
+                    执行结果：{execution_result}
+                    """
+                    
+                    final_messages = [
+                        {"role": "system", "content": "你是一个总结专家，基于执行结果生成最终答案。"},
+                        {"role": "user", "content": final_prompt}
+                    ]
+                    
+                    final_response = await self.gateway.chat_completion(
+                        model=model["model_name"],
+                        messages=final_messages,
+                        domain_skill="Summary"
+                    )
+                    return final_response
+            
+            return response
+        except Exception as e:
+            print(f"[ReAct Loop Error] {e}")
+            # 回退到本地模型
+            local_response = await self._try_local_model(messages)
+            return local_response or "ReAct 循环执行失败"
 
     async def _simple_fusion(self, drafts: List[str]) -> str:
         """简单融合逻辑（作为回退）"""

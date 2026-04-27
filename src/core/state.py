@@ -13,6 +13,7 @@ class State(Enum):
     EXECUTE = "execute"
     RESEARCH = "research"
     CREATE = "create"
+    SUSPEND = "suspend"
     ERROR = "error"
     COMPLETE = "complete"
 
@@ -136,6 +137,13 @@ class AgentStateMachine(StateMachine):
             {"complete": State.COMPLETE.value, "error": State.ERROR.value}
         ))
         
+        # 挂起节点
+        self.add_node(StateNode(
+            State.SUSPEND.value,
+            self._suspend_handler,
+            {"resume": State.INIT.value, "complete": State.COMPLETE.value}
+        ))
+        
         # 错误节点
         self.add_node(StateNode(
             State.ERROR.value,
@@ -224,6 +232,14 @@ class AgentStateMachine(StateMachine):
                 context["error"] = str(e)
                 return "error", context
 
+    async def _suspend_handler(self, context: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+        from src.services.tracing import tracing
+        with tracing.start_span("state.suspend"):
+            error = context.get("error", "资源耗尽")
+            print(f"[StateMachine] 任务挂起: {error}")
+            context["final_answer"] = f"任务已挂起:\n{error}\n\n请等待 API 资源恢复或进行人工干预后重试。"
+            return "complete", context
+
     async def _error_handler(self, context: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
         from src.services.tracing import tracing
         with tracing.start_span("state.error", attributes={
@@ -231,6 +247,12 @@ class AgentStateMachine(StateMachine):
         }):
             error = context.get("error", "Unknown error")
             print(f"[Error] {error}")
+            
+            # 检查是否是资源耗尽错误
+            if "ComputeResourceExhaustedError" in str(error) or "高阶算力池已耗尽" in str(error):
+                print("[StateMachine] 检测到资源耗尽错误，将任务挂起")
+                return "suspend", context
+            
             try:
                 error_response = await self.orchestrator._handle_error(error)
                 context["final_answer"] = f"任务执行失败: {error}\n\n解决方案: {error_response}"

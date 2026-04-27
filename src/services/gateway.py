@@ -13,6 +13,111 @@ from src.services.tracing import tracing
 from src.data.database import AsyncSessionLocal, APIAsset
 from src.config import config
 from src.services.llmops.langfuse import langfuse_integration
+from src.core.intent_analyzer import IntentAnalyzer
+
+class ComputeResourceExhaustedError(Exception):
+    """计算资源耗尽异常"""
+    pass
+
+class ResourceGuard:
+    """资源保护类"""
+    
+    def __init__(self):
+        self.api_health_status = {}
+        self.last_health_check = 0
+        self.health_check_interval = 300  # 5分钟
+    
+    async def check_api_health(self):
+        """检查 API 连通性"""
+        current_time = time.time()
+        if current_time - self.last_health_check < self.health_check_interval:
+            return
+        
+        print("[ResourceGuard] 开始 API 健康检查")
+        
+        try:
+            async with AsyncSessionLocal() as session:
+                from sqlalchemy import select
+                result = await session.execute(
+                    select(APIAsset).where(APIAsset.enabled == True)
+                )
+                nodes = [
+                    {
+                        "node_id": asset.id,
+                        "model_name": asset.model_name,
+                        "base_url": asset.base_url,
+                        "api_key": asset.api_key
+                    }
+                    for asset in result.scalars().all()
+                ]
+            
+            for node in nodes:
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        # 发送一个简单的请求来检查连通性
+                        response = await client.post(
+                            f"{node['base_url']}/v1/chat/completions",
+                            headers={
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {node['api_key']}"
+                            },
+                            json={
+                                "model": node["model_name"],
+                                "messages": [{"role": "user", "content": "ping"}],
+                                "max_tokens": 1
+                            }
+                        )
+                        self.api_health_status[node["model_name"]] = {
+                            "healthy": response.status_code == 200,
+                            "status_code": response.status_code
+                        }
+                except Exception as e:
+                    self.api_health_status[node["model_name"]] = {
+                        "healthy": False,
+                        "error": str(e)
+                    }
+            
+            self.last_health_check = current_time
+            print("[ResourceGuard] API 健康检查完成")
+        except Exception as e:
+            print(f"[ResourceGuard] 健康检查失败: {e}")
+    
+    def is_api_healthy(self, model_name: str) -> bool:
+        """检查特定 API 是否健康"""
+        status = self.api_health_status.get(model_name, {})
+        return status.get("healthy", False)
+    
+    def get_healthy_apis(self) -> List[str]:
+        """获取健康的 API 列表"""
+        return [model for model, status in self.api_health_status.items() if status.get("healthy", False)]
+    
+    async def get_safe_fallback_chain(self, route_level: int) -> List[str]:
+        """获取安全降级链"""
+        # 对于 L2 及以下任务
+        if route_level <= 2:
+            return ["API", "免费 API", "本地 4B 模型"]
+        # 对于 L3 至 L7 任务
+        else:
+            return ["Pro API", "Flash API", "免费 API"]
+    
+    async def check_resource_availability(self, route_level: int) -> bool:
+        """检查资源可用性"""
+        # 对于 L3 至 L7 任务，需要检查高级 API 是否可用
+        if route_level >= 3:
+            # 检查是否有健康的 Pro/Flash API
+            healthy_apis = self.get_healthy_apis()
+            has_high_power_api = any(
+                any(keyword in api.lower() for keyword in ["gpt-4", "gemini-1.5", "claude-3", "flash"])
+                for api in healthy_apis
+            )
+            return has_high_power_api
+        return True
+    
+    def should_block_local_fallback(self, route_level: int) -> bool:
+        """判断是否应该阻止本地回退"""
+        # 对于 L3 至 L7 任务，禁止回退到本地 8B 模型
+        return route_level >= 3
 
 class GatewayRequest:
     def __init__(self, model: str, messages: List[Dict[str, str]], domain_skill: str):
@@ -33,6 +138,7 @@ class AsyncGateway:
         self.semantic_cache = SemanticCache()
         self.r = None
         self.redis_initialized = False
+        self.resource_guard = ResourceGuard()
         self.prompts = {
             "default": "你是一个专业的AI助手，能够提供准确、清晰的回答。",
             "code": "你是一个专业的编程助手，能够提供高质量的代码和解释。",
@@ -47,6 +153,8 @@ class AsyncGateway:
             "research": "1.0.0",
             "creative": "1.0.0"
         }
+        # 启动 API 健康检查
+        asyncio.create_task(self.resource_guard.check_api_health())
 
     async def chat_completion(self, model: str, messages: List[Dict[str, str]], domain_skill: str) -> str:
         with tracing.start_span("gateway.chat_completion", attributes={
@@ -62,13 +170,32 @@ class AsyncGateway:
                     return cached_response
                 span.set_attribute("cache_hit", False)
 
+            # 分析任务意图，确定路由级别
+            user_input = next((msg["content"] for msg in messages if msg["role"] == "user"), "")
+            intent_analysis = IntentAnalyzer.analyze_intent(user_input)
+            route_level = intent_analysis["route_level"]
+            print(f"[Gateway] 任务路由级别: L{route_level} ({intent_analysis['route_name']})")
+
+            # 检查资源可用性
+            resource_available = await self.resource_guard.check_resource_availability(route_level)
+            if not resource_available:
+                # 对于 L3-L7 任务，触发硬熔断
+                if route_level >= 3:
+                    print("🚨 高阶算力池已耗尽，为保证【高价值/高复杂】任务执行质量，已拒绝使用本地模型强行处理。任务已挂起，等待 API 恢复或人工干预。")
+                    raise ComputeResourceExhaustedError("高阶算力池已耗尽，任务已挂起")
+
             # 获取最佳节点
             with tracing.start_span("gateway.get_best_node"):
                 node = await self.get_best_node(domain_skill)
                 if not node:
-                    response = await self._try_local_model(messages)
-                    self._trace_prompt_usage(domain_skill, messages, response)
-                    return response
+                    # 检查是否允许本地回退
+                    if self.resource_guard.should_block_local_fallback(route_level):
+                        print("🚨 高阶算力池已耗尽，为保证【高价值/高复杂】任务执行质量，已拒绝使用本地模型强行处理。任务已挂起，等待 API 恢复或人工干预。")
+                        raise ComputeResourceExhaustedError("高阶算力池已耗尽，任务已挂起")
+                    else:
+                        response = await self._try_local_model(messages)
+                        self._trace_prompt_usage(domain_skill, messages, response)
+                        return response
 
             # 尝试请求
             max_attempts = config.MAX_RETRY_ATTEMPTS
@@ -89,10 +216,14 @@ class AsyncGateway:
                         print(f"[Gateway] 请求失败 (尝试 {attempt+1}/{max_attempts}): {e}")
                         await asyncio.sleep(config.RETRY_DELAY)
 
-            # 所有尝试都失败，使用本地模型
-            response = await self._try_local_model(messages)
-            self._trace_prompt_usage(domain_skill, messages, response)
-            return response
+            # 所有尝试都失败，检查是否允许本地回退
+            if self.resource_guard.should_block_local_fallback(route_level):
+                print("🚨 高阶算力池已耗尽，为保证【高价值/高复杂】任务执行质量，已拒绝使用本地模型强行处理。任务已挂起，等待 API 恢复或人工干预。")
+                raise ComputeResourceExhaustedError("高阶算力池已耗尽，任务已挂起")
+            else:
+                response = await self._try_local_model(messages)
+                self._trace_prompt_usage(domain_skill, messages, response)
+                return response
 
     async def get_best_node(self, domain_skill: str) -> Optional[Dict[str, Any]]:
         try:

@@ -13,9 +13,10 @@ import uuid
 from src.services.gateway import AsyncGateway
 from src.services.semantic_cache import SemanticCache
 from src.services.tracing import tracing
-from src.data.database import init_db, AsyncSessionLocal, APIAsset
+from src.data.database import init_db, AsyncSessionLocal, APIAsset, record_token_usage, get_token_estimate
 from src.config import config
 from src.core.orchestrator import AsyncRealOrchestrator
+from src.core.task_analyzer import task_analyzer
 
 class Message(BaseModel):
     role: str
@@ -132,10 +133,29 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             # 转换消息格式
             messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
 
+            # Token 预估：先报价格，再执行
+            task_type = "general"
+            if messages:
+                user_input = messages[-1]["content"]
+                # 简单任务类型分类
+                if any(keyword in user_input.lower() for keyword in ["code", "编程", "写代码"]):
+                    task_type = "code"
+                elif any(keyword in user_input.lower() for keyword in ["分析", "评估", "研究"]):
+                    task_type = "analysis"
+                elif any(keyword in user_input.lower() for keyword in ["创意", "设计", "写"]):
+                    task_type = "creative"
+                elif any(keyword in user_input.lower() for keyword in ["什么是", "如何", "为什么"]):
+                    task_type = "information"
+            
+            # 获取 Token 预估
+            model_name = request.model or "auto"
+            token_estimate = await get_token_estimate(task_type, model_name)
+            print(f"[OpenAI-Shim] Token 预估: {token_estimate['avg_total_tokens']} tokens")
+
             # 尝试语义缓存
             with tracing.start_span("semantic_cache.get"):
                 cache_key = {
-                    "model": request.model or "auto",
+                    "model": model_name,
                     "messages": messages,
                     "temperature": request.temperature
                 }
@@ -156,6 +176,21 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
             if raw_request.headers.get("X-Aagent-Mode") == "deep":
                 is_reasoning_mode = True
 
+            # 任务分析器：使用语义方差法自动判断路由
+            if not is_reasoning_mode:
+                with tracing.start_span("task_analyzer.analyze"):
+                    # 获取用户输入
+                    user_input = messages[-1]["content"] if messages else ""
+                    if user_input:
+                        analysis_result = await task_analyzer.analyze_task(user_input)
+                        recommended_route = analysis_result["recommended_route"]
+                        is_reasoning_mode = (recommended_route == "reasoning")
+                        
+                        if is_reasoning_mode:
+                            print(f"[OpenAI-Shim] TaskAnalyzer 推荐深度推理模式")
+                        else:
+                            print(f"[OpenAI-Shim] TaskAnalyzer 推荐快速路由模式")
+
             if is_reasoning_mode:
                 # 走深度思考慢车道
                 with tracing.start_span("orchestrator.run_reasoning_flow"):
@@ -169,7 +204,18 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                     response_text = await gateway.fast_route(messages, domain_skill="Desktop_Assistant")
 
             # 构建响应
-            response = _build_response(response_text, request.model or "auto", messages)
+            response = _build_response(response_text, model_name, messages)
+            
+            # 记录 Token 使用情况
+            prompt_tokens = response.usage.prompt_tokens
+            completion_tokens = response.usage.completion_tokens
+            total_tokens = response.usage.total_tokens
+            
+            # 异步记录 Token 使用
+            asyncio.create_task(
+                record_token_usage(task_type, model_name, prompt_tokens, completion_tokens, total_tokens)
+            )
+            print(f"[OpenAI-Shim] 记录 Token 使用: {total_tokens} tokens")
             
             # 设置缓存
             await semantic_cache.set(cache_key, response)
