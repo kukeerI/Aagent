@@ -2,8 +2,34 @@
 # 数据模型
 
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
+
+class DraftScore(BaseModel):
+    draft_id: str
+    factuality_score: int = Field(ge=1, le=5, description="事实准确性得分")
+    logic_score: int = Field(ge=1, le=5, description="逻辑自洽性得分")
+    efficiency_score: int = Field(ge=1, le=5, description="执行效率得分")
+    justification: str = Field(description="打分事实依据")
+
+class Vulnerability(BaseModel):
+    draft_id: str
+    severity: Literal["High", "Medium", "Low"]
+    description: str = Field(description="致命漏洞、幻觉或效率陷阱的描述")
+
+class JudgeResponse(BaseModel):
+    scores: List[DraftScore]
+    vulnerabilities: List[Vulnerability]
+    best_draft_id: str
+    winning_reason: str
+
+class EntityCheck(BaseModel):
+    entity_name: str
+    confidence: Literal["High", "Medium", "Low"]
+    verification_query: Optional[str] = Field(description="用于搜索引擎核实的关键词（仅中低置信度需要）")
+
+class EntityVerificationResponse(BaseModel):
+    entities: List[EntityCheck]
 
 class TaskRequest(BaseModel):
     task: str = Field(..., description="任务描述")
