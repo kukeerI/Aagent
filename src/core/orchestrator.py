@@ -315,11 +315,18 @@ class AsyncRealOrchestrator:
         Returns:
             Tuple[str, bool]: (最终答案, 是否需要人工干预)
         """
+        workflow_start_time = time.time()
         print(f"\n[Aagent 评审系统] ========================================")
-        print(f"[Aagent 评审系统] 开始四步评审工作流")
+        print(f"[Aagent 评审系统] 开始四步评审工作流 (开发模式: {config.DEV_MODE})")
         print(f"[Aagent 评审系统] ========================================")
+        
+        # 开发模式：快速失败检查
+        if config.DEV_FAST_FAIL and not nodes:
+            print("[开发模式] 无可用节点，快速失败")
+            return await self._simple_fusion(drafts), False
 
         # Step 1: 盲测准备 (Blind Prep)
+        step1_start = time.time()
         with tracing.start_span("blind_prep"):
             print("[Step 1] 盲测准备: 匿名化并打乱草案顺序")
             # 随机打乱顺序
@@ -335,9 +342,11 @@ class AsyncRealOrchestrator:
             for draft_id, draft_content in anonymous_drafts.items():
                 drafts_text += f"{draft_id}:\n{draft_content}\n\n"
             
-            print(f"[Aagent 评审系统]：已生成 {len(drafts)} 份匿名草稿进行博弈。")
+            step1_elapsed = time.time() - step1_start
+            print(f"[Aagent 评审系统]：已生成 {len(drafts)} 份匿名草稿进行博弈。(耗时: {step1_elapsed:.2f}s)")
 
         # Step 2: 双角色打分 (Dual-Persona Scoring)
+        step2_start = time.time()
         with tracing.start_span("dual_persona_scoring"):
             print("[Step 2] 双角色打分: 调用高算力节点进行评审")
             # 构建评审提示
@@ -359,10 +368,14 @@ class AsyncRealOrchestrator:
             ]
             
             try:
+                import httpx
+                print(f"[Step 2] 开始评审请求 (超时: {config.REQUEST_TIMEOUT}s)")
                 from openai import AsyncOpenAI
+                http_client = httpx.AsyncClient(timeout=config.REQUEST_TIMEOUT)
                 client = AsyncOpenAI(
                     base_url=high_power_node["base_url"],
-                    api_key=high_power_node["api_key"]
+                    api_key=high_power_node["api_key"],
+                    http_client=http_client
                 )
                 judge_response = await client.chat.completions.create(
                     model=high_power_node["model_name"],
@@ -370,6 +383,8 @@ class AsyncRealOrchestrator:
                     temperature=0.7
                 )
                 judge_content = judge_response.choices[0].message.content
+                step2_elapsed = time.time() - step2_start
+                print(f"[Step 2] 评审请求成功 (耗时: {step2_elapsed:.2f}s)")
                 
                 # 解析评审结果
                 judge_result = json.loads(judge_content)
@@ -386,13 +401,21 @@ class AsyncRealOrchestrator:
                 print(f"  [最终决策]：采纳 {judge_response_obj.best_draft_id}")
                 print(f"  获胜理由: {judge_response_obj.winning_reason}")
                 
+            except asyncio.TimeoutError:
+                step2_elapsed = time.time() - step2_start
+                print(f"[Step 2] 评审请求超时 (耗时: {step2_elapsed:.2f}s)")
+                # 回退到简单融合
+                final_answer = await self._simple_fusion(drafts)
+                return final_answer, False
             except Exception as e:
-                print(f"[评审失败] {e}")
+                step2_elapsed = time.time() - step2_start
+                print(f"[Step 2] 评审失败 (耗时: {step2_elapsed:.2f}s): {e}")
                 # 回退到简单融合
                 final_answer = await self._simple_fusion(drafts)
                 return final_answer, False
 
         # Step 3: 实体核查 (Entity Extraction)
+        step3_start = time.time()
         with tracing.start_span("entity_extraction"):
             print("[Step 3] 实体核查: 对获胜方案进行实体提取和置信度评估")
             # 获取获胜方案
@@ -408,10 +431,14 @@ class AsyncRealOrchestrator:
             ]
             
             try:
+                import httpx
+                print(f"[Step 3] 开始实体核查请求 (超时: {config.REQUEST_TIMEOUT}s)")
                 from openai import AsyncOpenAI
+                http_client = httpx.AsyncClient(timeout=config.REQUEST_TIMEOUT)
                 client = AsyncOpenAI(
                     base_url=high_power_node["base_url"],
-                    api_key=high_power_node["api_key"]
+                    api_key=high_power_node["api_key"],
+                    http_client=http_client
                 )
                 entity_response = await client.chat.completions.create(
                     model=high_power_node["model_name"],
@@ -419,6 +446,8 @@ class AsyncRealOrchestrator:
                     temperature=0.7
                 )
                 entity_content = entity_response.choices[0].message.content
+                step3_elapsed = time.time() - step3_start
+                print(f"[Step 3] 实体核查请求成功 (耗时: {step3_elapsed:.2f}s)")
                 
                 # 解析实体核查结果
                 entity_result = json.loads(entity_content)
@@ -434,11 +463,17 @@ class AsyncRealOrchestrator:
                     else:
                         print(f"  [高置信度] {entity.entity_name}")
                 
+            except asyncio.TimeoutError:
+                step3_elapsed = time.time() - step3_start
+                print(f"[Step 3] 实体核查请求超时 (耗时: {step3_elapsed:.2f}s)")
+                entity_response_obj = EntityVerificationResponse(entities=[])
             except Exception as e:
-                print(f"[实体核查失败] {e}")
+                step3_elapsed = time.time() - step3_start
+                print(f"[Step 3] 实体核查失败 (耗时: {step3_elapsed:.2f}s): {e}")
                 entity_response_obj = EntityVerificationResponse(entities=[])
 
         # Step 4: 人工锚定拦截点 (Human-in-the-Loop Anchoring)
+        step4_start = time.time()
         with tracing.start_span("human_in_the_loop"):
             print("[Step 4] 人工锚定拦截: 检查高危漏洞和低置信度实体")
             
@@ -450,6 +485,11 @@ class AsyncRealOrchestrator:
             
             # 决定是否需要人工干预
             need_human_intervention = bool(high_risk_vulnerabilities or low_confidence_entities)
+            
+            # 开发模式：跳过人工干预，快速通过
+            if config.DEV_MODE and config.DEV_FAST_FAIL:
+                print("[开发模式] 跳过人工干预，快速通过")
+                need_human_intervention = False
             
             if need_human_intervention:
                 print("[系统挂起] 🚨 发现高危漏洞或低置信度实体，等待人工核实与指令...")
@@ -475,11 +515,15 @@ class AsyncRealOrchestrator:
                     return "方案被人工废弃", True
             else:
                 print("[系统放行] 未发现高危风险，方案正常执行")
+            
+            step4_elapsed = time.time() - step4_start
+            print(f"[Step 4] 人工锚定拦截完成 (耗时: {step4_elapsed:.2f}s)")
 
         # 返回最终结果
         final_answer = best_draft_content
+        workflow_elapsed = time.time() - workflow_start_time
         print(f"\n[Aagent 评审系统] ========================================")
-        print(f"[Aagent 评审系统] 四步评审工作流完成")
+        print(f"[Aagent 评审系统] 四步评审工作流完成 (总耗时: {workflow_elapsed:.2f}s)")
         print(f"[Aagent 评审系统] ========================================")
         
         return final_answer, need_human_intervention

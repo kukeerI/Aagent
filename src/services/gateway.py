@@ -133,19 +133,33 @@ class AsyncGateway:
             return None
 
     async def _make_request(self, node: Dict[str, Any], messages: List[Dict[str, str]]) -> str:
+        import httpx
+        start_time = time.time()
         try:
+            print(f"[Gateway] 开始请求节点 {node['model_name']} (超时: {config.REQUEST_TIMEOUT}s)")
             from openai import AsyncOpenAI
+            http_client = httpx.AsyncClient(timeout=config.REQUEST_TIMEOUT)
             client = AsyncOpenAI(
                 base_url=node["base_url"],
-                api_key=node["api_key"]
+                api_key=node["api_key"],
+                http_client=http_client
             )
             response = await client.chat.completions.create(
                 model=node["model_name"],
                 messages=messages,
                 temperature=0.7
             )
+            elapsed_time = time.time() - start_time
+            print(f"[Gateway] 请求成功，耗时: {elapsed_time:.2f}s")
             return response.choices[0].message.content
+        except asyncio.TimeoutError:
+            elapsed_time = time.time() - start_time
+            print(f"[Gateway] 请求超时 (耗时: {elapsed_time:.2f}s)，节点: {node['model_name']}")
+            await self._update_failure_count(node["node_id"])
+            raise
         except Exception as e:
+            elapsed_time = time.time() - start_time
+            print(f"[Gateway] 请求失败 (耗时: {elapsed_time:.2f}s): {e}")
             # 更新失败次数
             await self._update_failure_count(node["node_id"])
             raise

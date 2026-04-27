@@ -24,7 +24,7 @@ class Config:
     
     # 沙箱配置
     DOCKER_ENABLED: bool = os.getenv("DOCKER_ENABLED", "True").lower() == "true"
-    SANDBOX_TIMEOUT: int = int(os.getenv("SANDBOX_TIMEOUT", "10"))  # 秒
+    SANDBOX_TIMEOUT: int = int(os.getenv("SANDBOX_TIMEOUT", "5"))  # 秒 - 开发模式减少等待
     SANDBOX_MEMORY_LIMIT: str = os.getenv("SANDBOX_MEMORY_LIMIT", "512m")
     
     # 语义缓存配置
@@ -34,9 +34,15 @@ class Config:
     # 记忆系统配置
     MAX_SHORT_TERM_MEMORY: int = int(os.getenv("MAX_SHORT_TERM_MEMORY", "100"))
     
-    # 网关配置
-    MAX_RETRY_ATTEMPTS: int = int(os.getenv("MAX_RETRY_ATTEMPTS", "3"))
-    RETRY_DELAY: float = float(os.getenv("RETRY_DELAY", "1.0"))  # 秒
+    # 网关配置 - 开发模式优化：减少重试和延迟，快速失败
+    MAX_RETRY_ATTEMPTS: int = int(os.getenv("MAX_RETRY_ATTEMPTS", "1"))  # 减少重试次数
+    RETRY_DELAY: float = float(os.getenv("RETRY_DELAY", "0.5"))  # 减少重试延迟
+    REQUEST_TIMEOUT: float = float(os.getenv("REQUEST_TIMEOUT", "8.0"))  # 请求超时时间
+    
+    # 开发模式配置
+    DEV_MODE: bool = os.getenv("DEV_MODE", "true").lower() == "true"  # 默认开启开发模式
+    DEV_FAST_FAIL: bool = os.getenv("DEV_FAST_FAIL", "true").lower() == "true"  # 快速失败
+    DEV_SKIP_EXTERNAL_CALLS: bool = os.getenv("DEV_SKIP_EXTERNAL_CALLS", "false").lower() == "true"  # 跳过外部调用
     
     # 日志配置
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
