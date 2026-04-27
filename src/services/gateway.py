@@ -259,3 +259,53 @@ class AsyncGateway:
                 self.prompts[domain_skill] = original_prompt
         
         return results
+
+    async def fast_route(self, messages: List[Dict[str, str]], domain_skill: str = "Desktop_Assistant") -> str:
+        """快速路由 - 用于 Open Interpreter 等需要极速响应的场景
+        
+        Args:
+            messages: 消息列表
+            domain_skill: 领域技能
+            
+        Returns:
+            响应内容
+        """
+        with tracing.start_span("gateway.fast_route", attributes={
+            "domain_skill": domain_skill,
+            "trace_id": self.trace_id
+        }) as span:
+            # 尝试语义缓存
+            with tracing.start_span("semantic_cache.get"):
+                request = GatewayRequest("auto", messages, domain_skill)
+                cached_response = await self.semantic_cache.get(request.model_dump())
+                if cached_response:
+                    span.set_attribute("cache_hit", True)
+                    return cached_response
+                span.set_attribute("cache_hit", False)
+
+            # 获取最佳节点
+            with tracing.start_span("gateway.get_best_node"):
+                node = await self.get_best_node(domain_skill)
+                if not node:
+                    response = await self._try_local_model(messages)
+                    self._trace_prompt_usage(domain_skill, messages, response)
+                    return response
+
+            # 单次请求，不重试
+            with tracing.start_span("gateway.make_request", attributes={
+                "node_id": node["node_id"],
+                "model_name": node["model_name"]
+            }):
+                try:
+                    response = await self._make_request(node, messages)
+                    # 设置缓存
+                    await self.semantic_cache.set(request.model_dump(), response)
+                    # 追踪Prompt使用情况
+                    self._trace_prompt_usage(domain_skill, messages, response)
+                    return response
+                except Exception as e:
+                    print(f"[Fast Route] 请求失败: {e}")
+                    # 直接降级到本地模型，不重试
+                    response = await self._try_local_model(messages)
+                    self._trace_prompt_usage(domain_skill, messages, response)
+                    return response

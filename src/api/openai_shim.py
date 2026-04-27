@@ -4,7 +4,7 @@
 import asyncio
 import time
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -15,6 +15,7 @@ from src.services.semantic_cache import SemanticCache
 from src.services.tracing import tracing
 from src.data.database import init_db, AsyncSessionLocal, APIAsset
 from src.config import config
+from src.core.orchestrator import AsyncRealOrchestrator
 
 class Message(BaseModel):
     role: str
@@ -119,7 +120,7 @@ async def list_models():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(request: ChatCompletionRequest, raw_request: Request):
     """OpenAI 兼容的 chat completions 接口"""
     try:
         trace_id = str(uuid.uuid4())
@@ -130,9 +131,6 @@ async def chat_completions(request: ChatCompletionRequest):
         }) as span:
             # 转换消息格式
             messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
-
-            # 获取系统提示（如果有）
-            system_prompt = next((msg['content'] for msg in messages if msg['role'] == 'system'), None)
 
             # 尝试语义缓存
             with tracing.start_span("semantic_cache.get"):
@@ -147,29 +145,31 @@ async def chat_completions(request: ChatCompletionRequest):
                     return cached_response
                 span.set_attribute("cache_hit", False)
 
-            # 获取最佳节点
-            with tracing.start_span("gateway.get_best_node"):
-                node = await gateway.get_best_node("Desktop_Assistant")
-                if not node:
-                    # 直接使用本地模型
-                    response_text = await gateway._try_local_model(messages)
-                    response = _build_response(response_text, request.model or "local-model", messages)
-                    await semantic_cache.set(cache_key, response)
-                    return response
+            # 双引擎动态路由
+            is_reasoning_mode = False
+            
+            # 检查模型名称
+            if request.model and "reasoning" in request.model:
+                is_reasoning_mode = True
+            
+            # 检查请求头
+            if raw_request.headers.get("X-Aagent-Mode") == "deep":
+                is_reasoning_mode = True
 
-            # 单次请求，不进行 Maker-Checker 或重试
-            with tracing.start_span("gateway.make_request", attributes={
-                "node_id": node["node_id"],
-                "model_name": node["model_name"]
-            }):
-                try:
-                    response_text = await gateway._make_request(node, messages)
-                except Exception as e:
-                    print(f"[OpenAI-Shim] 请求失败，尝试本地模型: {e}")
-                    response_text = await gateway._try_local_model(messages)
+            if is_reasoning_mode:
+                # 走深度思考慢车道
+                with tracing.start_span("orchestrator.run_reasoning_flow"):
+                    print(f"[OpenAI-Shim] 进入深度推理模式")
+                    orchestrator = AsyncRealOrchestrator(trace_id=trace_id)
+                    response_text = await orchestrator.run_reasoning_flow(messages, trace=trace_id)
+            else:
+                # 走 OI 极速代理快车道
+                with tracing.start_span("gateway.fast_route"):
+                    print(f"[OpenAI-Shim] 进入快速路由模式")
+                    response_text = await gateway.fast_route(messages, domain_skill="Desktop_Assistant")
 
             # 构建响应
-            response = _build_response(response_text, request.model or node["model_name"], messages)
+            response = _build_response(response_text, request.model or "auto", messages)
             
             # 设置缓存
             await semantic_cache.set(cache_key, response)
