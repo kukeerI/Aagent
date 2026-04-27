@@ -7,6 +7,7 @@ import random
 import time
 from typing import Optional, List, Dict, Any
 import uuid
+from enum import Enum
 
 from src.services.semantic_cache import SemanticCache
 from src.services.tracing import tracing
@@ -19,6 +20,12 @@ class ComputeResourceExhaustedError(Exception):
     """计算资源耗尽异常"""
     pass
 
+class CircuitState(Enum):
+    """熔断器状态"""
+    CLOSED = "closed"    # 正常
+    OPEN = "open"        # 熔断
+    HALF_OPEN = "half_open"  # 半开
+
 class ResourceGuard:
     """资源保护类"""
     
@@ -26,6 +33,10 @@ class ResourceGuard:
         self.api_health_status = {}
         self.last_health_check = 0
         self.health_check_interval = 300  # 5分钟
+        self.circuit_breakers = {}  # 熔断器状态
+        self.failure_threshold = 3  # 失败阈值
+        self.base_retry_delay = 30  # 基础重试延迟（秒）
+        self.max_retry_delay = 3600  # 最大重试延迟（秒）
     
     async def check_api_health(self):
         """检查 API 连通性"""
@@ -52,6 +63,12 @@ class ResourceGuard:
                 ]
             
             for node in nodes:
+                model_name = node["model_name"]
+                # 检查熔断器状态
+                if not self._should_attempt_request(model_name):
+                    print(f"[ResourceGuard] 熔断器开启，跳过 {model_name} 的健康检查")
+                    continue
+                
                 try:
                     import httpx
                     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -68,29 +85,108 @@ class ResourceGuard:
                                 "max_tokens": 1
                             }
                         )
-                        self.api_health_status[node["model_name"]] = {
+                        self.api_health_status[model_name] = {
                             "healthy": response.status_code == 200,
                             "status_code": response.status_code
                         }
+                        # 重置熔断器
+                        self._reset_circuit_breaker(model_name)
                 except Exception as e:
-                    self.api_health_status[node["model_name"]] = {
+                    self.api_health_status[model_name] = {
                         "healthy": False,
                         "error": str(e)
                     }
+                    # 更新熔断器状态
+                    self._update_circuit_breaker(model_name, False)
             
             self.last_health_check = current_time
             print("[ResourceGuard] API 健康检查完成")
         except Exception as e:
             print(f"[ResourceGuard] 健康检查失败: {e}")
     
+    def _should_attempt_request(self, model_name: str) -> bool:
+        """判断是否应该尝试请求"""
+        breaker = self.circuit_breakers.get(model_name, {
+            "state": CircuitState.CLOSED.value,
+            "failure_count": 0,
+            "last_failure_time": 0,
+            "retry_delay": self.base_retry_delay
+        })
+        
+        if breaker["state"] == CircuitState.CLOSED.value:
+            return True
+        elif breaker["state"] == CircuitState.HALF_OPEN.value:
+            return True
+        elif breaker["state"] == CircuitState.OPEN.value:
+            # 检查是否达到重试时间
+            current_time = time.time()
+            if current_time - breaker["last_failure_time"] >= breaker["retry_delay"]:
+                # 进入半开状态
+                breaker["state"] = CircuitState.HALF_OPEN.value
+                self.circuit_breakers[model_name] = breaker
+                return True
+            return False
+        
+        return True
+    
+    def _update_circuit_breaker(self, model_name: str, success: bool):
+        """更新熔断器状态"""
+        breaker = self.circuit_breakers.get(model_name, {
+            "state": CircuitState.CLOSED.value,
+            "failure_count": 0,
+            "last_failure_time": 0,
+            "retry_delay": self.base_retry_delay
+        })
+        
+        if success:
+            # 成功，重置熔断器
+            self._reset_circuit_breaker(model_name)
+        else:
+            # 失败，增加失败计数
+            breaker["failure_count"] += 1
+            breaker["last_failure_time"] = time.time()
+            
+            if breaker["failure_count"] >= self.failure_threshold:
+                # 达到失败阈值，进入熔断状态
+                breaker["state"] = CircuitState.OPEN.value
+                # 计算带抖动的指数退避延迟
+                breaker["retry_delay"] = min(
+                    breaker["retry_delay"] * 2,
+                    self.max_retry_delay
+                )
+                # 添加抖动
+                jitter = random.uniform(0.8, 1.2)
+                breaker["retry_delay"] *= jitter
+                print(f"[ResourceGuard] {model_name} 进入熔断状态，重试延迟: {breaker['retry_delay']:.2f}s")
+            
+            self.circuit_breakers[model_name] = breaker
+    
+    def _reset_circuit_breaker(self, model_name: str):
+        """重置熔断器"""
+        self.circuit_breakers[model_name] = {
+            "state": CircuitState.CLOSED.value,
+            "failure_count": 0,
+            "last_failure_time": 0,
+            "retry_delay": self.base_retry_delay
+        }
+        print(f"[ResourceGuard] {model_name} 熔断器重置")
+    
     def is_api_healthy(self, model_name: str) -> bool:
         """检查特定 API 是否健康"""
+        # 首先检查熔断器状态
+        if not self._should_attempt_request(model_name):
+            return False
+        
         status = self.api_health_status.get(model_name, {})
         return status.get("healthy", False)
     
     def get_healthy_apis(self) -> List[str]:
         """获取健康的 API 列表"""
-        return [model for model, status in self.api_health_status.items() if status.get("healthy", False)]
+        healthy_apis = []
+        for model_name in self.api_health_status:
+            if self.is_api_healthy(model_name):
+                healthy_apis.append(model_name)
+        return healthy_apis
     
     async def get_safe_fallback_chain(self, route_level: int) -> List[str]:
         """获取安全降级链"""
@@ -153,8 +249,7 @@ class AsyncGateway:
             "research": "1.0.0",
             "creative": "1.0.0"
         }
-        # 启动 API 健康检查
-        asyncio.create_task(self.resource_guard.check_api_health())
+        # API 健康检查将在外部事件循环中调用
 
     async def chat_completion(self, model: str, messages: List[Dict[str, str]], domain_skill: str) -> str:
         with tracing.start_span("gateway.chat_completion", attributes={
@@ -172,7 +267,13 @@ class AsyncGateway:
 
             # 分析任务意图，确定路由级别
             user_input = next((msg["content"] for msg in messages if msg["role"] == "user"), "")
-            intent_analysis = IntentAnalyzer.analyze_intent(user_input)
+            
+            # 首先通过 TaskAnalyzer 提取语义数据
+            from src.core.task_analyzer import task_analyzer
+            semantic_data = await task_analyzer.extract_semantic_data(user_input)
+            
+            # 然后通过 IntentAnalyzer 计算路由级别
+            intent_analysis = IntentAnalyzer.analyze_intent(user_input, semantic_data)
             route_level = intent_analysis["route_level"]
             print(f"[Gateway] 任务路由级别: L{route_level} ({intent_analysis['route_name']})")
 
@@ -266,8 +367,9 @@ class AsyncGateway:
     async def _make_request(self, node: Dict[str, Any], messages: List[Dict[str, str]]) -> str:
         import httpx
         start_time = time.time()
+        model_name = node["model_name"]
         try:
-            print(f"[Gateway] 开始请求节点 {node['model_name']} (超时: {config.REQUEST_TIMEOUT}s)")
+            print(f"[Gateway] 开始请求节点 {model_name} (超时: {config.REQUEST_TIMEOUT}s)")
             from openai import AsyncOpenAI
             http_client = httpx.AsyncClient(timeout=config.REQUEST_TIMEOUT)
             client = AsyncOpenAI(
@@ -276,23 +378,29 @@ class AsyncGateway:
                 http_client=http_client
             )
             response = await client.chat.completions.create(
-                model=node["model_name"],
+                model=model_name,
                 messages=messages,
                 temperature=0.7
             )
             elapsed_time = time.time() - start_time
             print(f"[Gateway] 请求成功，耗时: {elapsed_time:.2f}s")
+            # 更新熔断器状态（成功）
+            self.resource_guard._update_circuit_breaker(model_name, True)
             return response.choices[0].message.content
         except asyncio.TimeoutError:
             elapsed_time = time.time() - start_time
-            print(f"[Gateway] 请求超时 (耗时: {elapsed_time:.2f}s)，节点: {node['model_name']}")
+            print(f"[Gateway] 请求超时 (耗时: {elapsed_time:.2f}s)，节点: {model_name}")
             await self._update_failure_count(node["node_id"])
+            # 更新熔断器状态（失败）
+            self.resource_guard._update_circuit_breaker(model_name, False)
             raise
         except Exception as e:
             elapsed_time = time.time() - start_time
             print(f"[Gateway] 请求失败 (耗时: {elapsed_time:.2f}s): {e}")
             # 更新失败次数
             await self._update_failure_count(node["node_id"])
+            # 更新熔断器状态（失败）
+            self.resource_guard._update_circuit_breaker(model_name, False)
             raise
 
     async def _update_failure_count(self, node_id: int):

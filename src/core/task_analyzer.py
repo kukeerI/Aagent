@@ -1,10 +1,10 @@
 # src/core/task_analyzer.py
-# 任务动态路由器 - 任务分析与路由决策
+# 任务分析器 - 仅负责 NLP 语义提取
 
 import asyncio
 import json
 import numpy as np
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Optional
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
 import time
@@ -14,7 +14,7 @@ from src.services.tracing import tracing
 from src.config import config
 
 class TaskAnalyzer:
-    """任务分析器 - 用于分析任务的创新度和确定性"""
+    """任务分析器 - 仅负责 NLP 语义提取"""
     
     def __init__(self):
         self.gateway = AsyncGateway()
@@ -27,67 +27,52 @@ class TaskAnalyzer:
             print("[TaskAnalyzer] 将使用远程 API 进行嵌入计算")
             self.use_local_embedding = False
     
-    async def analyze_task(self, user_input: str) -> Dict[str, Any]:
-        """分析任务的创新度和确定性
+    async def extract_semantic_data(self, user_input: str) -> Dict[str, Any]:
+        """提取语义数据
         
         Args:
             user_input: 用户输入的任务描述
             
         Returns:
-            Dict: 包含任务分析结果的字典
+            Dict: 包含语义提取结果的字典
         """
-        with tracing.start_span("task_analyzer.analyze_task") as span:
+        with tracing.start_span("task_analyzer.extract_semantic_data") as span:
             span.set_attribute("user_input", user_input[:100])
             
             start_time = time.time()
-            print(f"[TaskAnalyzer] 开始分析任务: {user_input[:50]}...")
+            print(f"[TaskAnalyzer] 开始提取语义数据: {user_input[:50]}...")
             
             # 步骤 1: 生成多个草案
             drafts = await self._generate_multiple_drafts(user_input, k=3)
             
             if not drafts:
-                print("[TaskAnalyzer] 无法生成草案，使用默认路由")
+                print("[TaskAnalyzer] 无法生成草案，返回默认语义数据")
                 return {
-                    "task_type": "default",
-                    "innovation_score": 0.5,
-                    "certainty_score": 0.5,
-                    "recommended_route": "fast",
-                    "drafts_generated": False
+                    "task_type": self._classify_task_type(user_input),
+                    "drafts": [],
+                    "embedding_distances": [],
+                    "semantic_variance": 0.0,
+                    "extraction_time": time.time() - start_time
                 }
             
             # 步骤 2: 计算语义方差
             embedding_distances = await self._calculate_embedding_distances(drafts)
             semantic_variance = self._calculate_semantic_variance(embedding_distances)
             
-            # 步骤 3: 计算创新度和确定性
-            innovation_score = self._calculate_innovation_score(semantic_variance)
-            certainty_score = self._calculate_certainty_score(embedding_distances)
-            
-            # 步骤 4: 确定推荐路由
-            recommended_route = self._determine_route(innovation_score, certainty_score)
-            
-            # 步骤 5: 分析任务类型
-            task_type = self._classify_task_type(user_input)
-            
-            analysis_result = {
-                "task_type": task_type,
-                "innovation_score": innovation_score,
-                "certainty_score": certainty_score,
+            semantic_data = {
+                "task_type": self._classify_task_type(user_input),
+                "drafts": drafts,
+                "embedding_distances": embedding_distances,
                 "semantic_variance": semantic_variance,
-                "recommended_route": recommended_route,
-                "drafts_generated": True,
-                "drafts_count": len(drafts),
-                "analysis_time": time.time() - start_time
+                "extraction_time": time.time() - start_time
             }
             
-            print(f"[TaskAnalyzer] 分析结果:")
-            print(f"  任务类型: {task_type}")
-            print(f"  创新度: {innovation_score:.2f}")
-            print(f"  确定性: {certainty_score:.2f}")
+            print(f"[TaskAnalyzer] 语义提取完成:")
+            print(f"  任务类型: {semantic_data['task_type']}")
+            print(f"  生成草案数: {len(drafts)}")
             print(f"  语义方差: {semantic_variance:.4f}")
-            print(f"  推荐路由: {recommended_route}")
             
-            return analysis_result
+            return semantic_data
     
     async def _generate_multiple_drafts(self, user_input: str, k: int = 3) -> List[str]:
         """生成多个草案
@@ -190,58 +175,6 @@ class TaskAnalyzer:
             return 0.0
         
         return np.var(distances)
-    
-    def _calculate_innovation_score(self, semantic_variance: float) -> float:
-        """计算创新度分数
-        
-        Args:
-            semantic_variance: 语义方差
-            
-        Returns:
-            float: 创新度分数 (0-1)
-        """
-        # 语义方差越大，创新度越高
-        # 将方差映射到 0-1 范围
-        max_variance = 2.0  # 理论最大余弦距离为 2
-        innovation_score = min(semantic_variance / max_variance, 1.0)
-        return innovation_score
-    
-    def _calculate_certainty_score(self, distances: List[float]) -> float:
-        """计算确定性分数
-        
-        Args:
-            distances: 距离列表
-            
-        Returns:
-            float: 确定性分数 (0-1)
-        """
-        if not distances:
-            return 0.5
-        
-        # 平均距离越小，确定性越高
-        avg_distance = np.mean(distances)
-        max_distance = 2.0
-        certainty_score = max(1.0 - (avg_distance / max_distance), 0.0)
-        return certainty_score
-    
-    def _determine_route(self, innovation_score: float, certainty_score: float) -> str:
-        """确定推荐路由
-        
-        Args:
-            innovation_score: 创新度分数
-            certainty_score: 确定性分数
-            
-        Returns:
-            str: 推荐路由 ("fast" 或 "reasoning")
-        """
-        # 决策逻辑
-        # 高创新度 + 低确定性 → 需要深度推理
-        # 低创新度 + 高确定性 → 快速路由
-        
-        if innovation_score > 0.6 or certainty_score < 0.4:
-            return "reasoning"
-        else:
-            return "fast"
     
     def _classify_task_type(self, user_input: str) -> str:
         """分类任务类型

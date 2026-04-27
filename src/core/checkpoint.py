@@ -26,10 +26,34 @@ class CheckpointManager:
         checkpoint_id = str(uuid.uuid4())
         timestamp = datetime.now()
         
+        # 使用 StateDTO 验证和序列化上下文
+        try:
+            # 动态导入 StateDTO，避免循环导入
+            from src.core.state import StateDTO
+            
+            # 确保 context 包含必要的字段
+            if 'trace_id' not in context:
+                context['trace_id'] = str(uuid.uuid4())
+            if 'user_input' not in context:
+                context['user_input'] = ''
+            
+            # 使用 StateDTO 验证和序列化
+            state_dto = StateDTO(**context)
+            validated_context = state_dto.model_dump()
+        except Exception as e:
+            print(f"[CheckpointManager] 验证上下文失败: {e}")
+            # 如果验证失败，使用默认值
+            validated_context = {
+                'trace_id': context.get('trace_id', str(uuid.uuid4())),
+                'user_input': context.get('user_input', ''),
+                'final_answer': context.get('final_answer'),
+                'error': context.get('error')
+            }
+        
         checkpoint = Checkpoint(
             checkpoint_id=checkpoint_id,
             state_name=state_name,
-            context=context,
+            context=validated_context,
             timestamp=timestamp
         )
         

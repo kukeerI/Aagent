@@ -569,6 +569,9 @@ class AsyncRealOrchestrator:
         """运行 ReAct 循环（工具/代码类任务）"""
         print(f"[{self.trace_id}] 采用 ReAct Loop 策略")
         
+        MAX_ITERATIONS = 5
+        MAX_OBSERVATION_TOKENS = 500
+        
         # 构建 ReAct 提示
         react_prompt = f"""你是一个解决问题的专家，采用 ReAct 模式：思考 -> 行动 -> 观察 -> 修正。
         
@@ -584,57 +587,179 @@ class AsyncRealOrchestrator:
         重复这个过程，直到问题解决。
         """
         
+        # 初始化消息
         messages = [
             {"role": "system", "content": "你是一个解决问题的专家，擅长使用 ReAct 模式解决工具和代码相关问题。"},
             {"role": "user", "content": react_prompt}
         ]
         
+        # 历史记录
+        history = []
+        
         # 选择合适的模型
         model = self._select_model(model_pool, task_type="Tool/Code")
         
         try:
-            response = await self.gateway.chat_completion(
-                model=model["model_name"],
-                messages=messages,
-                domain_skill="CodeExecution"
-            )
-            
-            # 提取行动部分并执行
-            import re
-            action_match = re.search(r"行动：(.*?)(?=观察：|修正：|$)", response)
-            if action_match:
-                code = action_match.group(1).strip()
-                if code:
+            for iteration in range(MAX_ITERATIONS):
+                print(f"[{self.trace_id}] ReAct 迭代 {iteration+1}/{MAX_ITERATIONS}")
+                
+                # 构建当前消息（包含历史记录的滑动窗口）
+                current_messages = self._build_react_messages(messages, history, MAX_OBSERVATION_TOKENS)
+                
+                # 调用模型
+                response = await self.gateway.chat_completion(
+                    model=model["model_name"],
+                    messages=current_messages,
+                    domain_skill="CodeExecution"
+                )
+                
+                # 提取 ReAct 组件
+                import re
+                thought_match = re.search(r"思考：(.*?)(?=行动：|$)", response)
+                action_match = re.search(r"行动：(.*?)(?=观察：|修正：|$)", response)
+                correction_match = re.search(r"修正：(.*?)(?=思考：|$)", response)
+                
+                thought = thought_match.group(1).strip() if thought_match else ""
+                action = action_match.group(1).strip() if action_match else ""
+                correction = correction_match.group(1).strip() if correction_match else ""
+                
+                # 执行行动
+                observation = ""
+                if action:
                     print(f"[{self.trace_id}] 执行代码:")
-                    print(code)
-                    execution_result = await self._safe_execute_code(code)
+                    print(action)
+                    execution_result = await self._safe_execute_code(action)
                     print(f"[{self.trace_id}] 执行结果: {execution_result}")
-                    
-                    # 基于执行结果生成最终答案
-                    final_prompt = f"""基于以下执行结果，生成最终答案：
-                    
-                    任务：{task}
-                    执行结果：{execution_result}
-                    """
-                    
-                    final_messages = [
-                        {"role": "system", "content": "你是一个总结专家，基于执行结果生成最终答案。"},
-                        {"role": "user", "content": final_prompt}
-                    ]
-                    
-                    final_response = await self.gateway.chat_completion(
-                        model=model["model_name"],
-                        messages=final_messages,
-                        domain_skill="Summary"
-                    )
-                    return final_response
+                    observation = execution_result
+                
+                # 记录历史
+                history.append({
+                    "thought": thought,
+                    "action": action,
+                    "observation": observation,
+                    "correction": correction
+                })
+                
+                # 检查是否解决
+                if "问题已解决" in response or "完成" in response or not action:
+                    print(f"[{self.trace_id}] ReAct 循环结束")
+                    break
             
-            return response
+            # 基于最终结果生成答案
+            final_answer = await self._generate_final_answer(task, history)
+            return final_answer
         except Exception as e:
             print(f"[ReAct Loop Error] {e}")
             # 回退到本地模型
             local_response = await self._try_local_model(messages)
             return local_response or "ReAct 循环执行失败"
+    
+    def _build_react_messages(self, base_messages: list, history: list, max_observation_tokens: int) -> list:
+        """构建包含历史记录的消息，实现滑动窗口和信息浓缩"""
+        messages = base_messages.copy()
+        
+        # 处理历史记录
+        if history:
+            # 只保留最近的几条记录
+            recent_history = history[-3:]  # 滑动窗口大小为3
+            
+            for i, entry in enumerate(recent_history):
+                # 浓缩观察结果
+                observation = entry["observation"]
+                if len(observation) > max_observation_tokens:
+                    observation = self._summarize_observation(observation)
+                
+                # 构建历史消息
+                history_content = f"""
+                迭代 {len(history) - len(recent_history) + i + 1}:
+                思考：{entry["thought"]}
+                行动：{entry["action"]}
+                观察：{observation}
+                修正：{entry["correction"]}
+                """
+                messages.append({"role": "assistant", "content": history_content})
+        
+        return messages
+    
+    def _summarize_observation(self, observation: str) -> str:
+        """浓缩观察结果"""
+        # 简单的浓缩逻辑
+        if "错误" in observation or "Exception" in observation:
+            # 提取错误类型和关键信息
+            import re
+            error_match = re.search(r"(\w+Error): (.*?)(?=\\n|$)", observation)
+            if error_match:
+                error_type = error_match.group(1)
+                error_msg = error_match.group(2)
+                return f"尝试执行操作，由于 {error_type}: {error_msg} 失败"
+            return "尝试执行操作失败"
+        else:
+            # 对于成功的执行结果，提取关键信息
+            lines = observation.split('\n')
+            if len(lines) > 3:
+                return f"执行成功，输出: {lines[0]}... (共 {len(lines)} 行)"
+            return observation
+    
+    async def _generate_final_answer(self, task: str, history: list) -> str:
+        """基于历史记录生成最终答案"""
+        # 构建总结提示
+        history_summary = ""
+        for i, entry in enumerate(history):
+            history_summary += f"迭代 {i+1}: 思考 '{entry['thought'][:50]}...', 行动 '{entry['action'][:50]}...', 观察 '{entry['observation'][:50]}...'\n"
+        
+        final_prompt = f"""基于以下 ReAct 历史记录，生成最终答案：
+        
+        任务：{task}
+        
+        历史记录：
+        {history_summary}
+        
+        请生成一个清晰、完整的最终答案，总结解决问题的过程和结果。
+        """
+        
+        final_messages = [
+            {"role": "system", "content": "你是一个总结专家，基于 ReAct 历史记录生成最终答案。"},
+            {"role": "user", "content": final_prompt}
+        ]
+        
+        # 选择合适的模型
+        model_pool = await self._get_model_pool()
+        model = self._select_model(model_pool, task_type="Writing/Design")
+        
+        try:
+            final_response = await self.gateway.chat_completion(
+                model=model["model_name"],
+                messages=final_messages,
+                domain_skill="Summary"
+            )
+            return final_response
+        except Exception as e:
+            print(f"[Generate Final Answer Error] {e}")
+            # 回退到本地模型
+            local_response = await self._try_local_model(final_messages)
+            return local_response or "生成最终答案失败"
+    
+    async def _get_model_pool(self) -> List[Dict[str, Any]]:
+        """获取模型池"""
+        try:
+            async with AsyncSessionLocal() as session:
+                from sqlalchemy import select
+                result = await session.execute(
+                    select(APIAsset).where(APIAsset.enabled == True)
+                )
+                nodes = [
+                    {
+                        "node_id": asset.id,
+                        "model_name": asset.model_name,
+                        "base_url": asset.base_url,
+                        "api_key": asset.api_key
+                    }
+                    for asset in result.scalars().all()
+                ]
+            return nodes
+        except Exception as e:
+            print(f"[Get Model Pool Error] {e}")
+            return []
 
     async def _simple_fusion(self, drafts: List[str]) -> str:
         """简单融合逻辑（作为回退）"""

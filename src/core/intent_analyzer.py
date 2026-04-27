@@ -8,12 +8,20 @@ class IntentAnalyzer:
     """意图分析器"""
     
     @staticmethod
-    def analyze_intent(task: str) -> Dict[str, Any]:
-        """分析任务意图并计算路由级别"""
+    def analyze_intent(task: str, semantic_data: Dict[str, Any] = None) -> Dict[str, Any]:
+        """分析任务意图并计算路由级别
+        
+        Args:
+            task: 任务描述
+            semantic_data: 从 TaskAnalyzer 提取的语义数据
+            
+        Returns:
+            Dict: 包含意图分析结果的字典
+        """
         # 计算三个维度的分数
         value = IntentAnalyzer._calculate_value(task)
-        complexity = IntentAnalyzer._calculate_complexity(task)
-        innovation = IntentAnalyzer._calculate_innovation(task)
+        complexity = IntentAnalyzer._calculate_complexity(task, semantic_data)
+        innovation = IntentAnalyzer._calculate_innovation(task, semantic_data)
         
         # 确定路由级别
         route_level = IntentAnalyzer._determine_route_level(value, complexity, innovation)
@@ -68,7 +76,7 @@ class IntentAnalyzer:
         return max(1, min(10, score))
     
     @staticmethod
-    def _calculate_complexity(task: str) -> int:
+    def _calculate_complexity(task: str, semantic_data: Dict[str, Any] = None) -> int:
         """计算复杂程度分数 [1-10]"""
         # 高复杂度关键词
         high_complexity_keywords = [
@@ -111,11 +119,20 @@ class IntentAnalyzer:
         elif len(task) > 1000:
             score += 2
         
+        # 根据语义数据调整复杂度分数
+        if semantic_data:
+            # 语义方差越大，复杂度可能越高
+            semantic_variance = semantic_data.get("semantic_variance", 0.0)
+            if semantic_variance > 0.1:
+                score += 1
+            elif semantic_variance > 0.2:
+                score += 2
+        
         # 确保分数在 1-10 范围内
         return max(1, min(10, score))
     
     @staticmethod
-    def _calculate_innovation(task: str) -> int:
+    def _calculate_innovation(task: str, semantic_data: Dict[str, Any] = None) -> int:
         """计算创新程度分数 [1-5]"""
         # 高创新关键词
         high_innovation_keywords = [
@@ -140,6 +157,15 @@ class IntentAnalyzer:
         for keyword in medium_innovation_keywords:
             if keyword in task.lower():
                 score += 0.5
+        
+        # 根据语义数据调整创新分数
+        if semantic_data:
+            # 语义方差越大，创新度可能越高
+            semantic_variance = semantic_data.get("semantic_variance", 0.0)
+            if semantic_variance > 0.1:
+                score += 0.5
+            elif semantic_variance > 0.2:
+                score += 1
         
         # 确保分数在 1-5 范围内
         return max(1, min(5, int(score)))
@@ -185,42 +211,3 @@ class IntentAnalyzer:
             7: "巅峰博弈"
         }
         return route_names.get(route_level, "标准代理")
-    
-    @staticmethod
-    def classify_task_type(task: str) -> str:
-        """分类任务类型"""
-        # 工具/代码类
-        tool_code_patterns = [
-            r"代码", r"编程", r"开发", r"写.*程序", r"实现", r"函数", r"脚本",
-            r"code", r"program", r"develop", r"implement", r"script", r"function"
-        ]
-        
-        # 逻辑/推演类
-        logic_math_patterns = [
-            r"分析", r"推理", r"计算", r"数学", r"逻辑", r"证明",
-            r"analyze", r"reason", r"calculate", r"math", r"logic", r"prove"
-        ]
-        
-        # 文本/方案类
-        writing_design_patterns = [
-            r"写", r"文档", r"方案", r"设计", r"创意", r"文章",
-            r"write", r"document", r"plan", r"design", r"creative", r"article"
-        ]
-        
-        # 检查工具/代码类
-        for pattern in tool_code_patterns:
-            if re.search(pattern, task.lower()):
-                return "Tool/Code"
-        
-        # 检查逻辑/推演类
-        for pattern in logic_math_patterns:
-            if re.search(pattern, task.lower()):
-                return "Logic/Math"
-        
-        # 检查文本/方案类
-        for pattern in writing_design_patterns:
-            if re.search(pattern, task.lower()):
-                return "Writing/Design"
-        
-        # 默认类型
-        return "Writing/Design"

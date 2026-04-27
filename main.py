@@ -1,7 +1,7 @@
 # main.py - Aagent Ultimate V1.1 启动入口
 import asyncio
 from dotenv import load_dotenv
-from src.orchestrator import AsyncRealOrchestrator
+from src.core.orchestrator import AsyncRealOrchestrator
 
 load_dotenv()  # 加载 .env 文件
 

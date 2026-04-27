@@ -2,10 +2,34 @@
 # 状态机系统 - 图结构状态管理
 
 from enum import Enum
-from typing import Dict, Any, Callable, Optional, List
+from typing import Dict, Any, Callable, Optional, List, Union
 import asyncio
+from pydantic import BaseModel, Field, field_validator
 
 from src.core.checkpoint import CheckpointManager, Checkpoint
+
+class StateDTO(BaseModel):
+    """状态数据传输对象"""
+    trace_id: str
+    user_input: str
+    previous_context: Optional[Dict[str, Any]] = None
+    final_answer: Optional[str] = None
+    error: Optional[str] = None
+    analysis: Optional[Dict[str, Any]] = None
+    model_used: Optional[str] = None
+    is_local_fallback: bool = False
+    
+    @field_validator('previous_context', 'analysis', mode='before')
+    @classmethod
+    def validate_dict(cls, v):
+        if v is None:
+            return {}
+        if isinstance(v, dict):
+            return v
+        return {}
+    
+    class Config:
+        extra = 'allow'  # 允许额外字段，但会被剥离
 
 class State(Enum):
     INIT = "init"
