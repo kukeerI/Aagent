@@ -13,6 +13,7 @@ import json
 import numpy as np
 import re
 import time
+import zlib
 from typing import List, Dict, Any, Optional
 from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
@@ -21,6 +22,7 @@ from src.services.gateway import AsyncGateway
 from src.services.tracing import tracing
 from src.config import config
 from src.utils.logger import logger
+from src.data.domain_models import TaskPhysicalProfile
 
 
 class TaskAnalyzer:
@@ -31,7 +33,21 @@ class TaskAnalyzer:
     - 计算文本嵌入和语义方差
     - 分类任务类型
     - 支持 Fast Pass 极速分诊
+    - 提取物理特征指纹（信息熵、术语密度、N-gram多样性）
     """
+
+    # 类级别预编译正则表达式 - 避免每次实例化重复编译
+    # 核心领域关键词正则（学术/技术领域）
+    DOMAIN_REGEX = re.compile(
+        r'\b(nature|manuscript|pathway|protocol|mechanism|algorithm|refactor|framework|optimization|implementation|paradigm)\b',
+        re.IGNORECASE
+    )
+    
+    # 技术术语正则
+    TECH_REGEX = re.compile(
+        r'\b(python|java|javascript|sql|api|docker|kubernetes|aws|azure|machine learning|deep learning|neural network)\b',
+        re.IGNORECASE
+    )
 
     def __init__(self, gateway: Optional[AsyncGateway] = None):
         """初始化任务分析器
@@ -100,6 +116,137 @@ class TaskAnalyzer:
             if pattern.search(task):
                 return True
         return False
+
+    def _calculate_entropy(self, text: str) -> float:
+        """计算压缩比作为信息熵的近似值
+
+        使用 Gzip 压缩比来衡量文本的信息密度。
+        压缩比越高（接近1.0），代表信息熵越大（文本越难压缩）。
+        压缩比越低（接近0.0），代表信息熵越小（文本越容易压缩）。
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            float: 信息熵值（0.0-1.0），0.0 表示低信息密度，1.0 表示高信息密度
+        """
+        if not text:
+            return 0.0
+
+        try:
+            encoded = text.encode('utf-8')
+            # 限制输入大小，防止内存溢出
+            if len(encoded) > 1024 * 1024:  # 超过 1MB 截断
+                encoded = encoded[:1024 * 1024]
+            
+            compressed = zlib.compress(encoded)
+            compression_ratio = len(compressed) / len(encoded)
+            
+            # 将压缩比转换为熵值（压缩越困难，熵越高）
+            # 压缩比接近 1.0 表示很难压缩，信息熵高
+            # 压缩比接近 0.0 表示容易压缩，信息熵低
+            return min(max(compression_ratio, 0.0), 1.0)
+        except Exception as e:
+            logger.error(f"[TaskAnalyzer] 信息熵计算失败: {e}")
+            return 0.0
+
+    def _calculate_term_density(self, text: str) -> float:
+        """计算术语密度
+
+        统计文本中领域关键词的出现频率，反映任务的专业性。
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            float: 术语密度（0.0-1.0），0.0 表示无专业术语，1.0 表示高度专业
+        """
+        if not text:
+            return 0.0
+
+        words = text.split()
+        if not words:
+            return 0.0
+
+        # 统计领域关键词匹配
+        domain_matches = self.DOMAIN_REGEX.findall(text)
+        tech_matches = self.TECH_REGEX.findall(text)
+        total_matches = len(domain_matches) + len(tech_matches)
+
+        # 归一化处理：除以词数的 1/10，确保结果在合理范围内
+        density = total_matches / (len(words) / 10 + 1)
+        
+        return min(max(density, 0.0), 1.0)
+
+    def _calculate_ngram_diversity(self, text: str, n: int = 2) -> float:
+        """计算 N-gram 多样性
+
+        作为语义方差的轻量级补充，通过统计 N-gram 的唯一性来衡量文本的丰富度。
+
+        Args:
+            text: 输入文本
+            n: N-gram 的 N 值，默认为 2（双词）
+
+        Returns:
+            float: N-gram 多样性（0.0-1.0），0.0 表示重复度高，1.0 表示多样性高
+        """
+        if not text or len(text) < n:
+            return 0.0
+
+        # 生成所有 N-gram
+        ngrams = []
+        for i in range(len(text) - n + 1):
+            ngrams.append(text[i:i+n])
+
+        if not ngrams:
+            return 0.0
+
+        # 计算唯一 N-gram 的比例
+        unique_ngrams = set(ngrams)
+        diversity = len(unique_ngrams) / len(ngrams)
+
+        return min(max(diversity, 0.0), 1.0)
+
+    async def extract_physical_profile(self, task: str) -> TaskPhysicalProfile:
+        """提取物理特征画像
+
+        极速计算任务的物理特征，不调用任何 LLM 或 Embedding 模型。
+        对于简单任务（is_fast_pass），直接返回基础画像。
+
+        Args:
+            task: 任务描述文本
+
+        Returns:
+            TaskPhysicalProfile: 物理特征画像对象
+        """
+        # 短路逻辑：简单任务直接返回基础画像
+        is_simple = await self._check_fast_pass(task)
+        if is_simple:
+            logger.info(f"[TaskAnalyzer] 任务 '{task[:30]}...' 符合快速通过条件，返回基础物理画像")
+            return TaskPhysicalProfile(
+                size=len(task),
+                entropy=0.0,
+                term_density=0.0,
+                structural_variance=0.0
+            )
+
+        # 极速计算物理指标（纯 CPU 计算，毫秒级完成）
+        entropy = self._calculate_entropy(task)
+        term_density = self._calculate_term_density(task)
+        
+        # 只有在熵值或密度达到一定阈值，才计算结构方差（N-gram多样性）
+        structural_variance = 0.0
+        if entropy > 0.5 or term_density > 0.3:
+            structural_variance = self._calculate_ngram_diversity(task)
+
+        logger.debug(f"[TaskAnalyzer] 物理特征提取完成 - 熵: {entropy:.4f}, 密度: {term_density:.4f}, 方差: {structural_variance:.4f}")
+
+        return TaskPhysicalProfile(
+            size=len(task),
+            entropy=entropy,
+            term_density=term_density,
+            structural_variance=structural_variance
+        )
 
     async def analyze_task_adaptive(self, task: str) -> Dict[str, Any]:
         """自适应任务分析入口
