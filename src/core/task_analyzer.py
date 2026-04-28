@@ -248,6 +248,147 @@ class TaskAnalyzer:
             structural_variance=structural_variance
         )
 
+    def _calculate_ngram_volatility(self, drafts: List[str]) -> float:
+        """计算 N-gram 波动率（语义波动率）
+
+        学术方法：自我一致性检验。
+        计算多个草案之间的 Bigram 重合度标准差，用于衡量模型生成的多个草案之间的差异。
+        波动率越高，表示草案之间差异越大，任务可能越复杂或需要更多思考。
+
+        Args:
+            drafts: 多个草案文本列表
+
+        Returns:
+            float: 波动率值（0.0-1.0），0.0 表示草案高度一致，1.0 表示草案差异很大
+        """
+        if len(drafts) < 2:
+            logger.debug("[TaskAnalyzer] 草案数量不足，无法计算波动率")
+            return 0.0
+
+        # 生成每个草案的 Bigram 集合
+        def get_bigrams(text: str) -> set:
+            """提取文本的 Bigram 集合"""
+            if len(text) < 2:
+                return set()
+            return set(zip(text[:-1], text[1:]))
+
+        bigram_sets = []
+        for draft in drafts:
+            if len(draft) > 1:
+                bigrams = get_bigrams(draft)
+                if bigrams:
+                    bigram_sets.append(bigrams)
+
+        # 处理所有草案都无法生成有效 Bigram 的情况
+        if not bigram_sets:
+            logger.debug("[TaskAnalyzer] 所有草案都无法生成有效 Bigram，波动率设为 1.0")
+            return 1.0
+
+        # 计算两两之间的 Jaccard 距离
+        distances = []
+        for i in range(len(bigram_sets)):
+            for j in range(i + 1, len(bigram_sets)):
+                set_i = bigram_sets[i]
+                set_j = bigram_sets[j]
+                
+                intersection = len(set_i & set_j)
+                union = len(set_i | set_j)
+                
+                if union > 0:
+                    jaccard_similarity = intersection / union
+                    jaccard_distance = 1.0 - jaccard_similarity
+                    distances.append(jaccard_distance)
+                else:
+                    distances.append(1.0)  # 两个空集合的距离视为最大
+
+        if not distances:
+            return 0.0
+
+        # 根据草案数量选择计算方式
+        if len(distances) == 1:
+            # 只有一对草案时，直接使用距离值作为波动率
+            return distances[0]
+        else:
+            # 多对草案时，计算距离的标准差作为波动率指标
+            std_dev = float(np.std(distances))
+            
+            # 归一化处理：标准差的最大值理论上可以很大
+            # 使用 tanh 进行归一化，使结果在 [0, 1] 之间
+            volatility = float(np.tanh(std_dev * 3))
+            
+            # 确保结果在 [0.0, 1.0] 范围内
+            return min(max(volatility, 0.0), 1.0)
+
+    async def generate_physical_profile(self, task: str) -> TaskPhysicalProfile:
+        """生成物理特征画像（阶梯式计算）
+
+        采用分层计算策略：
+        1. 首先进行 CPU 密集型计算（熵和术语密度）- 毫秒级完成
+        2. 只有当熵或术语密度达到阈值时，才触发昂贵的 LLM 草案生成
+        3. 根据草案计算语义波动率
+
+        这种设计可以节省大量的响应时间和 API 费用，因为简单任务不需要调用 LLM。
+
+        Args:
+            task: 任务描述文本
+
+        Returns:
+            TaskPhysicalProfile: 物理特征画像对象，包含：
+                - size: 文本长度
+                - entropy: 信息熵（0.0-1.0）
+                - term_density: 术语密度（0.0-1.0）
+                - structural_variance: 语义波动率（0.0-1.0）
+        """
+        logger.debug(f"[TaskAnalyzer] 开始生成物理特征画像: '{task[:50]}...'")
+        
+        # 1. CPU 密集型计算：熵与术语密度（毫秒级完成）
+        entropy = self._calculate_entropy(task)
+        logger.debug(f"[TaskAnalyzer] 信息熵计算完成: {entropy:.4f}")
+        
+        # 统计领域关键词匹配（使用预编译正则）
+        domain_matches = self.DOMAIN_REGEX.findall(task)
+        tech_matches = self.TECH_REGEX.findall(task)
+        total_matches = len(domain_matches) + len(tech_matches)
+        
+        words = task.split()
+        if not words:
+            term_density = 0.0
+        else:
+            # 归一化处理：除以词数的 1/10，确保结果在合理范围内
+            term_density = min(1.0, total_matches / (len(words) / 10 + 1))
+        logger.debug(f"[TaskAnalyzer] 术语密度计算完成: {term_density:.4f}")
+        
+        # 2. 阶梯式决策：只有信息熵或术语密度达到中等水平，才触发昂贵的草案生成
+        # 阈值设定：entropy > 0.4 或 term_density > 0.2
+        volatility = 0.0
+        if entropy > 0.4 or term_density > 0.2:
+            logger.info(f"[TaskAnalyzer] 触发草案生成 - 熵: {entropy:.4f}, 密度: {term_density:.4f}")
+            try:
+                # 调用 LLM 生成多个草案
+                drafts = await self._generate_multiple_drafts(task)
+                logger.debug(f"[TaskAnalyzer] 草案生成完成，共 {len(drafts)} 个草案")
+                
+                # 计算语义波动率
+                if drafts:
+                    volatility = self._calculate_ngram_volatility(drafts)
+                    logger.debug(f"[TaskAnalyzer] 语义波动率计算完成: {volatility:.4f}")
+                else:
+                    logger.warning("[TaskAnalyzer] 草案生成失败，波动率设为 0.0")
+            except Exception as e:
+                logger.error(f"[TaskAnalyzer] 生成草案或计算波动率失败: {e}")
+                # 失败时保持波动率为 0.0，不影响后续流程
+        
+        # 3. 组装并返回物理特征画像
+        profile = TaskPhysicalProfile(
+            size=len(task),
+            entropy=entropy,
+            term_density=term_density,
+            structural_variance=volatility
+        )
+        
+        logger.debug(f"[TaskAnalyzer] 物理特征画像生成完成: {profile}")
+        return profile
+
     async def analyze_task_adaptive(self, task: str) -> Dict[str, Any]:
         """自适应任务分析入口
 
