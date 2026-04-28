@@ -346,6 +346,10 @@ class TaskCognitiveProfile(BaseProfile):
         True, 
         description="是否为确定性的闭环执行任务。True 表示有明确答案，False 表示开放式探索"
     )
+    is_fast_pass: bool = Field(
+        False,
+        description="是否为快速通道任务。True 表示可直接通过极速分诊，无需深度分析"
+    )
 
 
 class TaskProfile(BaseModel):

@@ -98,6 +98,101 @@ class Config:
         r'^\s*$'
     ]
 
+    # 业务画像配置
+    # 高危动作动词及其权重
+    HIGH_RISK_ACTIONS: dict = {
+        'delete': 0.9,
+        'drop': 0.9,
+        'remove': 0.8,
+        'destroy': 0.95,
+        'delete': 0.9,
+        '删除': 0.9,
+        '移除': 0.8,
+        '销毁': 0.95,
+        '删除': 0.9
+    }
+    
+    # 中危动作动词及其权重
+    MEDIUM_RISK_ACTIONS: dict = {
+        'modify': 0.5,
+        'change': 0.5,
+        'update': 0.5,
+        'alter': 0.5,
+        'refactor': 0.6,
+        '重构': 0.6,
+        '修改': 0.5,
+        '变更': 0.5,
+        '更新': 0.5
+    }
+    
+    # 低危动作动词及其权重
+    LOW_RISK_ACTIONS: dict = {
+        'create': 0.2,
+        'add': 0.15,
+        'write': 0.2,
+        'build': 0.25,
+        'develop': 0.25,
+        '创建': 0.2,
+        '添加': 0.15,
+        '编写': 0.2,
+        '构建': 0.25,
+        '开发': 0.25
+    }
+    
+    # 高质量领域关键词（Nature级任务标识）
+    HIGH_QUALITY_TERMS: List[str] = [
+        'nature', 'manuscript', 'protocol', 'research', 'academic',
+        '论文', '研究', '学术', '协议', '规范', '标准'
+    ]
+    
+    # 核心度归一化参数（最大连接数阈值）
+    CORENESS_MAX_DEGREE: int = 10
+
+    # 路由决策配置
+    # 基础级别计算权重
+    ROUTE_WEIGHTS: dict = {
+        'entropy': 0.3,
+        'term_density': 0.2,
+        'coreness': 0.2,
+        'risk_score': 0.15,
+        'sla_priority': 0.15
+    }
+    
+    # 提级门槛配置（架构师规范命名）
+    HIGH_ENTROPY_THRESHOLD: float = 0.7        # 信息熵高阈值，触发质量提级
+    HIGH_TERM_THRESHOLD: float = 0.6           # 术语密度高阈值，触发质量提级
+    HIGH_RISK_THRESHOLD: float = 0.8           # 风险分数临界值，触发风险熔断
+    HIGH_SLA_THRESHOLD: float = 0.8            # SLA优先级高阈值，触发质量提级
+    VARIANCE_THRESHOLD: float = 0.4            # 语义波动率阈值，触发不确定性补偿
+    FAST_PASS_RISK_LIMIT: float = 0.2          # 快速通道风险限制
+    
+    # 提级门槛配置（兼容旧代码）
+    ROUTE_THRESHOLDS: dict = {
+        'entropy_high': 0.7,          # 信息熵高阈值，触发提级
+        'term_density_high': 0.6,     # 术语密度高阈值，触发提级
+        'risk_score_critical': 0.8,   # 风险分数临界值，强制高路由
+        'sla_priority_high': 0.7,     # SLA优先级高阈值，触发提级
+        'structural_variance_high': 0.4,  # 语义波动率阈值，触发不确定性补偿
+        'dependency_gap_high': 0.6    # 依赖缺口高阈值，触发提级
+    }
+    
+    # 最低级别限制
+    ROUTE_MIN_LEVELS: dict = {
+        'nature_min_level': 4,        # Nature级任务最低级别
+        'critical_min_level': 6       # 高危任务最低级别
+    }
+    
+    # 路由级别名称映射
+    ROUTE_LEVEL_NAMES: dict = {
+        1: "本地吞吐",
+        2: "标准代理",
+        3: "高价单发",
+        4: "复杂执行",
+        5: "逻辑深钻",
+        6: "创意融合",
+        7: "巅峰博弈"
+    }
+
 
 # 创建全局配置实例，供整个应用使用
 config = Config()
