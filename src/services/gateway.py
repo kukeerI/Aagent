@@ -1,5 +1,11 @@
 # src/services/gateway.py
 # 网关 - 模型路由和负载均衡
+# 依赖：asyncio, json, random, time, typing, uuid, enum, src.services.semantic_cache, src.services.tracing, src.data.database, src.config, src.services.llmops.langfuse, src.core.intent_analyzer, src.core.exceptions
+# 注意事项：
+#   - 实现了熔断器模式，防止服务雪崩
+#   - 支持语义缓存，提高响应速度
+#   - 实现了智能路由，根据任务级别选择合适的模型
+#   - 支持本地模型回退，提高系统可靠性
 
 import asyncio
 import json
@@ -15,37 +21,65 @@ from src.data.database import AsyncSessionLocal, APIAsset
 from src.config import config
 from src.services.llmops.langfuse import langfuse_integration
 from src.core.intent_analyzer import IntentAnalyzer
+from src.core.exceptions import (
+    ComputeResourceExhaustedError,
+    ModelInferenceError,
+    GatewayError,
+    TimeoutError
+)
 
-class ComputeResourceExhaustedError(Exception):
-    """计算资源耗尽异常"""
-    pass
 
 class CircuitState(Enum):
-    """熔断器状态"""
+    """熔断器状态枚举
+
+    定义了熔断器的三种状态：
+    - CLOSED: 正常状态，允许请求通过
+    - OPEN: 熔断状态，拒绝请求
+    - HALF_OPEN: 半开状态，允许部分请求通过以测试服务是否恢复
+    """
     CLOSED = "closed"    # 正常
     OPEN = "open"        # 熔断
     HALF_OPEN = "half_open"  # 半开
 
+
 class ResourceGuard:
-    """资源保护类"""
-    
+    """资源保护类
+
+    负责管理 API 健康状态和熔断器，确保系统在 API 故障时能够优雅降级。
+    实现了以下功能：
+    - API 健康检查
+    - 熔断器模式
+    - 资源可用性检查
+    - 安全降级链管理
+    """
+
     def __init__(self):
-        self.api_health_status = {}
-        self.last_health_check = 0
-        self.health_check_interval = 300  # 5分钟
+        """初始化资源保护类
+
+        - 初始化 API 健康状态字典
+        - 初始化熔断器状态字典
+        - 设置健康检查间隔和失败阈值
+        """
+        self.api_health_status = {}  # API 健康状态
+        self.last_health_check = 0  # 上次健康检查时间
+        self.health_check_interval = 300  # 健康检查间隔（5分钟）
         self.circuit_breakers = {}  # 熔断器状态
         self.failure_threshold = 3  # 失败阈值
         self.base_retry_delay = 30  # 基础重试延迟（秒）
         self.max_retry_delay = 3600  # 最大重试延迟（秒）
-    
+
     async def check_api_health(self):
-        """检查 API 连通性"""
+        """检查 API 连通性
+
+        定期检查所有启用的 API 节点的健康状态，更新熔断器状态。
+        使用 httpx 发送 ping 请求来验证 API 连通性。
+        """
         current_time = time.time()
         if current_time - self.last_health_check < self.health_check_interval:
             return
-        
+
         print("[ResourceGuard] 开始 API 健康检查")
-        
+
         try:
             async with AsyncSessionLocal() as session:
                 from sqlalchemy import select
@@ -61,14 +95,14 @@ class ResourceGuard:
                     }
                     for asset in result.scalars().all()
                 ]
-            
+
             for node in nodes:
                 model_name = node["model_name"]
                 # 检查熔断器状态
                 if not self._should_attempt_request(model_name):
                     print(f"[ResourceGuard] 熔断器开启，跳过 {model_name} 的健康检查")
                     continue
-                
+
                 try:
                     import httpx
                     async with httpx.AsyncClient(timeout=5.0) as client:
@@ -98,21 +132,30 @@ class ResourceGuard:
                     }
                     # 更新熔断器状态
                     self._update_circuit_breaker(model_name, False)
-            
+
             self.last_health_check = current_time
             print("[ResourceGuard] API 健康检查完成")
         except Exception as e:
             print(f"[ResourceGuard] 健康检查失败: {e}")
-    
+
     def _should_attempt_request(self, model_name: str) -> bool:
-        """判断是否应该尝试请求"""
+        """判断是否应该尝试请求
+
+        根据熔断器状态判断是否应该尝试请求某个模型。
+
+        Args:
+            model_name: 模型名称
+
+        Returns:
+            bool: 是否应该尝试请求
+        """
         breaker = self.circuit_breakers.get(model_name, {
             "state": CircuitState.CLOSED.value,
             "failure_count": 0,
             "last_failure_time": 0,
             "retry_delay": self.base_retry_delay
         })
-        
+
         if breaker["state"] == CircuitState.CLOSED.value:
             return True
         elif breaker["state"] == CircuitState.HALF_OPEN.value:
@@ -126,18 +169,25 @@ class ResourceGuard:
                 self.circuit_breakers[model_name] = breaker
                 return True
             return False
-        
+
         return True
-    
+
     def _update_circuit_breaker(self, model_name: str, success: bool):
-        """更新熔断器状态"""
+        """更新熔断器状态
+
+        根据请求结果更新熔断器状态，实现熔断器模式的核心逻辑。
+
+        Args:
+            model_name: 模型名称
+            success: 请求是否成功
+        """
         breaker = self.circuit_breakers.get(model_name, {
             "state": CircuitState.CLOSED.value,
             "failure_count": 0,
             "last_failure_time": 0,
             "retry_delay": self.base_retry_delay
         })
-        
+
         if success:
             # 成功，重置熔断器
             self._reset_circuit_breaker(model_name)
@@ -145,7 +195,7 @@ class ResourceGuard:
             # 失败，增加失败计数
             breaker["failure_count"] += 1
             breaker["last_failure_time"] = time.time()
-            
+
             if breaker["failure_count"] >= self.failure_threshold:
                 # 达到失败阈值，进入熔断状态
                 breaker["state"] = CircuitState.OPEN.value
@@ -158,11 +208,17 @@ class ResourceGuard:
                 jitter = random.uniform(0.8, 1.2)
                 breaker["retry_delay"] *= jitter
                 print(f"[ResourceGuard] {model_name} 进入熔断状态，重试延迟: {breaker['retry_delay']:.2f}s")
-            
+
             self.circuit_breakers[model_name] = breaker
-    
+
     def _reset_circuit_breaker(self, model_name: str):
-        """重置熔断器"""
+        """重置熔断器
+
+        将熔断器状态重置为初始状态。
+
+        Args:
+            model_name: 模型名称
+        """
         self.circuit_breakers[model_name] = {
             "state": CircuitState.CLOSED.value,
             "failure_count": 0,
@@ -170,35 +226,66 @@ class ResourceGuard:
             "retry_delay": self.base_retry_delay
         }
         print(f"[ResourceGuard] {model_name} 熔断器重置")
-    
+
     def is_api_healthy(self, model_name: str) -> bool:
-        """检查特定 API 是否健康"""
+        """检查特定 API 是否健康
+
+        同时考虑熔断器状态和 API 健康状态。
+
+        Args:
+            model_name: 模型名称
+
+        Returns:
+            bool: API 是否健康
+        """
         # 首先检查熔断器状态
         if not self._should_attempt_request(model_name):
             return False
-        
+
         status = self.api_health_status.get(model_name, {})
         return status.get("healthy", False)
-    
+
     def get_healthy_apis(self) -> List[str]:
-        """获取健康的 API 列表"""
+        """获取健康的 API 列表
+
+        Returns:
+            List[str]: 健康的 API 模型名称列表
+        """
         healthy_apis = []
         for model_name in self.api_health_status:
             if self.is_api_healthy(model_name):
                 healthy_apis.append(model_name)
         return healthy_apis
-    
+
     async def get_safe_fallback_chain(self, route_level: int) -> List[str]:
-        """获取安全降级链"""
+        """获取安全降级链
+
+        根据任务的路由级别返回相应的降级链。
+
+        Args:
+            route_level: 路由级别
+
+        Returns:
+            List[str]: 降级链列表
+        """
         # 对于 L2 及以下任务
         if route_level <= 2:
             return ["API", "免费 API", "本地 4B 模型"]
         # 对于 L3 至 L7 任务
         else:
             return ["Pro API", "Flash API", "免费 API"]
-    
+
     async def check_resource_availability(self, route_level: int) -> bool:
-        """检查资源可用性"""
+        """检查资源可用性
+
+        根据任务的路由级别检查相应的资源是否可用。
+
+        Args:
+            route_level: 路由级别
+
+        Returns:
+            bool: 资源是否可用
+        """
         # 对于 L3 至 L7 任务，需要检查高级 API 是否可用
         if route_level >= 3:
             # 检查是否有健康的 Pro/Flash API
@@ -209,27 +296,71 @@ class ResourceGuard:
             )
             return has_high_power_api
         return True
-    
+
     def should_block_local_fallback(self, route_level: int) -> bool:
-        """判断是否应该阻止本地回退"""
+        """判断是否应该阻止本地回退
+
+        对于高价值/高复杂度的任务，禁止回退到本地模型以保证质量。
+
+        Args:
+            route_level: 路由级别
+
+        Returns:
+            bool: 是否应该阻止本地回退
+        """
         # 对于 L3 至 L7 任务，禁止回退到本地 8B 模型
         return route_level >= 3
 
+
 class GatewayRequest:
+    """网关请求类
+
+    封装了网关请求的相关信息，包括模型、消息和领域技能。
+    """
+
     def __init__(self, model: str, messages: List[Dict[str, str]], domain_skill: str):
+        """初始化网关请求
+
+        Args:
+            model: 模型名称
+            messages: 消息列表
+            domain_skill: 领域技能
+        """
         self.model = model
         self.messages = messages
         self.domain_skill = domain_skill
 
     def model_dump(self) -> Dict[str, Any]:
+        """将请求转换为字典
+
+        Returns:
+            Dict[str, Any]: 请求字典
+        """
         return {
             "model": self.model,
             "messages": self.messages,
             "domain_skill": self.domain_skill
         }
 
+
 class AsyncGateway:
+    """异步网关类
+
+    负责模型路由、负载均衡和请求处理，是系统与外部模型服务的接口。
+    实现了以下功能：
+    - 语义缓存
+    - 智能路由
+    - 熔断器模式
+    - 本地模型回退
+    - Prompt 管理
+    """
+
     def __init__(self, trace_id: str = None):
+        """初始化异步网关
+
+        Args:
+            trace_id: 追踪 ID，用于日志和追踪
+        """
         self.trace_id = trace_id or str(uuid.uuid4())
         self.semantic_cache = SemanticCache()
         self.r = None
@@ -252,6 +383,23 @@ class AsyncGateway:
         # API 健康检查将在外部事件循环中调用
 
     async def chat_completion(self, model: str, messages: List[Dict[str, str]], domain_skill: str) -> str:
+        """聊天完成
+
+        处理聊天请求，包括语义缓存、意图分析、资源检查、节点选择和请求执行。
+
+        Args:
+            model: 模型名称
+            messages: 消息列表
+            domain_skill: 领域技能
+
+        Returns:
+            str: 模型响应
+
+        Raises:
+            ComputeResourceExhaustedError: 高阶算力池耗尽时抛出
+            TimeoutError: 请求超时时抛出
+            ModelInferenceError: 模型推理失败时抛出
+        """
         with tracing.start_span("gateway.chat_completion", attributes={
             "domain_skill": domain_skill,
             "trace_id": self.trace_id
@@ -267,11 +415,11 @@ class AsyncGateway:
 
             # 分析任务意图，确定路由级别
             user_input = next((msg["content"] for msg in messages if msg["role"] == "user"), "")
-            
+
             # 首先通过 TaskAnalyzer 提取语义数据
             from src.core.task_analyzer import task_analyzer
             semantic_data = await task_analyzer.extract_semantic_data(user_input)
-            
+
             # 然后通过 IntentAnalyzer 计算路由级别
             intent_analysis = IntentAnalyzer.analyze_intent(user_input, semantic_data)
             route_level = intent_analysis["route_level"]
@@ -327,6 +475,16 @@ class AsyncGateway:
                 return response
 
     async def get_best_node(self, domain_skill: str) -> Optional[Dict[str, Any]]:
+        """获取最佳节点
+
+        根据权重和失败次数选择最佳的 API 节点。
+
+        Args:
+            domain_skill: 领域技能
+
+        Returns:
+            Optional[Dict[str, Any]]: 最佳节点信息，如果没有可用节点返回 None
+        """
         try:
             async with AsyncSessionLocal() as session:
                 from sqlalchemy import select
@@ -365,6 +523,19 @@ class AsyncGateway:
             return None
 
     async def _make_request(self, node: Dict[str, Any], messages: List[Dict[str, str]]) -> str:
+        """发送请求到模型节点
+
+        Args:
+            node: 节点信息
+            messages: 消息列表
+
+        Returns:
+            str: 模型响应
+
+        Raises:
+            TimeoutError: 请求超时时抛出
+            ModelInferenceError: 模型推理失败时抛出
+        """
         import httpx
         start_time = time.time()
         model_name = node["model_name"]
@@ -393,7 +564,7 @@ class AsyncGateway:
             await self._update_failure_count(node["node_id"])
             # 更新熔断器状态（失败）
             self.resource_guard._update_circuit_breaker(model_name, False)
-            raise
+            raise TimeoutError(f"请求节点 {model_name} 超时")
         except Exception as e:
             elapsed_time = time.time() - start_time
             print(f"[Gateway] 请求失败 (耗时: {elapsed_time:.2f}s): {e}")
@@ -401,9 +572,14 @@ class AsyncGateway:
             await self._update_failure_count(node["node_id"])
             # 更新熔断器状态（失败）
             self.resource_guard._update_circuit_breaker(model_name, False)
-            raise
+            raise ModelInferenceError(f"模型推理失败: {str(e)}")
 
     async def _update_failure_count(self, node_id: int):
+        """更新节点失败次数
+
+        Args:
+            node_id: 节点 ID
+        """
         try:
             async with AsyncSessionLocal() as session:
                 from sqlalchemy import select, update
@@ -418,6 +594,16 @@ class AsyncGateway:
             print(f"[Gateway] 更新失败次数失败: {e}")
 
     async def _try_local_model(self, messages: List[Dict[str, str]]) -> str:
+        """尝试使用本地模型
+
+        当所有远程模型都不可用时，尝试使用本地模型。
+
+        Args:
+            messages: 消息列表
+
+        Returns:
+            str: 本地模型响应
+        """
         try:
             from openai import AsyncOpenAI
             client = AsyncOpenAI(
@@ -435,15 +621,23 @@ class AsyncGateway:
             return "所有模型都不可用，请稍后重试。"
 
     def _trace_prompt_usage(self, domain_skill: str, messages: List[Dict[str, str]], response: str):
-        """追踪Prompt使用情况"""
+        """追踪Prompt使用情况
+
+        将Prompt使用情况追踪到 Langfuse。
+
+        Args:
+            domain_skill: 领域技能
+            messages: 消息列表
+            response: 模型响应
+        """
         # 提取系统提示
         system_prompt = next((msg['content'] for msg in messages if msg['role'] == 'system'), self.get_prompt(domain_skill))
         # 提取用户输入
         user_input = next((msg['content'] for msg in messages if msg['role'] == 'user'), "")
-        
+
         # 构建完整输入
         input_text = f"System: {system_prompt}\nUser: {user_input}"
-        
+
         # 追踪到Langfuse
         langfuse_integration.trace_prompt(
             prompt_name=domain_skill,
@@ -454,7 +648,16 @@ class AsyncGateway:
         )
 
     def get_prompt(self, domain_skill: str = "default") -> str:
-        """获取Prompt"""
+        """获取Prompt
+
+        尝试从 Langfuse 获取最新版本的 Prompt，失败则回退到本地 Prompt。
+
+        Args:
+            domain_skill: 领域技能
+
+        Returns:
+            str: Prompt 内容
+        """
         # 尝试从Langfuse获取最新版本的Prompt
         langfuse_prompt = langfuse_integration.get_prompt(domain_skill)
         if langfuse_prompt:
@@ -463,7 +666,15 @@ class AsyncGateway:
         return self.prompts.get(domain_skill, self.prompts["default"])
 
     def set_prompt(self, domain_skill: str, prompt: str, version: str = "1.0.0"):
-        """设置Prompt"""
+        """设置Prompt
+
+        设置本地 Prompt 并同步到 Langfuse。
+
+        Args:
+            domain_skill: 领域技能
+            prompt: Prompt 内容
+            version: 版本号
+        """
         self.prompts[domain_skill] = prompt
         self.prompt_versions[domain_skill] = version
         # 同步到Langfuse
@@ -474,7 +685,13 @@ class AsyncGateway:
         )
 
     def list_prompts(self) -> Dict[str, str]:
-        """列出所有Prompt"""
+        """列出所有Prompt
+
+        从 Langfuse 获取 Prompt 列表，失败则回退到本地 Prompt。
+
+        Returns:
+            Dict[str, str]: Prompt 名称和内容的字典
+        """
         # 从Langfuse获取Prompt列表
         langfuse_prompts = langfuse_integration.list_prompts()
         if langfuse_prompts:
@@ -483,14 +700,25 @@ class AsyncGateway:
         return self.prompts
 
     async def a_b_test_prompts(self, domain_skill: str, variants: List[str], test_inputs: List[str]) -> Dict[str, float]:
-        """A/B测试Prompt"""
+        """A/B测试Prompt
+
+        测试不同 Prompt 变体的效果。
+
+        Args:
+            domain_skill: 领域技能
+            variants: Prompt 变体列表
+            test_inputs: 测试输入列表
+
+        Returns:
+            Dict[str, float]: 各变体的得分
+        """
         results = {}
-        
+
         for i, variant in enumerate(variants):
             # 临时设置Prompt
             original_prompt = self.prompts.get(domain_skill)
             self.prompts[domain_skill] = variant
-            
+
             # 测试每个输入
             scores = []
             for test_input in test_inputs:
@@ -502,26 +730,28 @@ class AsyncGateway:
                 # 简单的评分机制（实际应用中可以使用更复杂的评估方法）
                 score = len(response) / 100  # 示例：基于响应长度的评分
                 scores.append(score)
-            
+
             # 计算平均得分
             average_score = sum(scores) / len(scores)
             results[f"variant_{i+1}"] = average_score
-            
+
             # 恢复原始Prompt
             if original_prompt:
                 self.prompts[domain_skill] = original_prompt
-        
+
         return results
 
     async def fast_route(self, messages: List[Dict[str, str]], domain_skill: str = "Desktop_Assistant") -> str:
-        """快速路由 - 用于 Open Interpreter 等需要极速响应的场景
-        
+        """快速路由
+
+        用于 Open Interpreter 等需要极速响应的场景，不进行复杂的路由和重试逻辑。
+
         Args:
             messages: 消息列表
             domain_skill: 领域技能
-            
+
         Returns:
-            响应内容
+            str: 模型响应
         """
         with tracing.start_span("gateway.fast_route", attributes={
             "domain_skill": domain_skill,
@@ -562,3 +792,15 @@ class AsyncGateway:
                     response = await self._try_local_model(messages)
                     self._trace_prompt_usage(domain_skill, messages, response)
                     return response
+
+    async def close(self):
+        """关闭网关，清理资源
+
+        关闭语义缓存等资源。
+        """
+        try:
+            if hasattr(self, 'semantic_cache') and hasattr(self.semantic_cache, 'close'):
+                await self.semantic_cache.close()
+            print("[Gateway] 已关闭")
+        except Exception as e:
+            print(f"[Gateway] 关闭失败: {e}")

@@ -3,17 +3,22 @@
 
 import asyncio
 import time
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import signal
+from typing import Optional
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from starlette.responses import Response
 from contextlib import asynccontextmanager
 import uuid
 
-from src.core.orchestrator import AsyncRealOrchestrator
+from src.core.orchestrator import AgentOrchestrator
 from src.data.database import init_db, AsyncSessionLocal, ExecutionLog
 from src.config import config
+from src.services.gateway import ComputeResourceExhaustedError
+from src.utils.logger import logger
 
 # Prometheus 指标
 REQUEST_COUNT = Counter('aagent_requests_total', 'Total number of requests', ['endpoint', 'method', 'status'])
@@ -31,8 +36,8 @@ class TaskRequest(BaseModel):
 class TaskResponse(BaseModel):
     trace_id: str
     status: str
-    result: str = None
-    error: str = None
+    result: str | None = None
+    error: str | None = None
 
 class HealthResponse(BaseModel):
     status: str
@@ -41,18 +46,75 @@ class HealthResponse(BaseModel):
 
 # 全局编排器实例
 orchestrator = None
+# 活动任务集合
+active_tasks = set()
+# 服务状态
+shutdown_event = asyncio.Event()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global orchestrator
+    
     # 启动时初始化
     await init_db()
-    orchestrator = AsyncRealOrchestrator()
+    orchestrator = AgentOrchestrator()
     ACTIVE_TASKS.set(0)
-    print("[API] Aagent 服务已启动")
-    yield
-    # 关闭时清理
-    print("[API] Aagent 服务已关闭")
+    
+    # 注册信号处理
+    def handle_sigterm(signum, frame):
+        logger.info("收到 SIGTERM 信号，准备优雅关闭")
+        shutdown_event.set()
+    
+    # 仅在非 Windows 系统注册信号处理
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, handle_sigterm)
+    
+    logger.info("Aagent 服务已启动")
+    
+    # 启动监控任务
+    monitor_task = asyncio.create_task(monitor_shutdown())
+    
+    try:
+        yield
+    finally:
+        # 关闭时清理
+        logger.info("开始优雅关闭流程")
+        
+        # 触发关闭事件
+        shutdown_event.set()
+        
+        # 等待监控任务完成
+        await monitor_task
+        
+        # 等待所有活动任务完成或超时
+        if active_tasks:
+            logger.info(f"等待 {len(active_tasks)} 个活动任务完成...")
+            try:
+                # 给 30 秒时间让任务优雅结束
+                await asyncio.wait_for(
+                    asyncio.gather(*active_tasks, return_exceptions=True),
+                    timeout=30.0
+                )
+            except asyncio.TimeoutError:
+                logger.warning("优雅关闭超时，强制终止剩余任务")
+        
+        # 关闭编排器
+        if orchestrator:
+            try:
+                await orchestrator.gateway.close()
+            except Exception as e:
+                logger.error(f"关闭编排器时出错: {e}")
+        
+        logger.info("Aagent 服务已关闭")
+
+async def monitor_shutdown():
+    """监控关闭事件"""
+    await shutdown_event.wait()
+    logger.info("开始处理关闭事件")
+    
+    # 可以在这里添加额外的关闭逻辑
+    # 比如停止接受新请求、通知正在执行的任务等
+
 
 app = FastAPI(
     title="Aagent API",
@@ -68,6 +130,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 全局异常处理器
+@app.exception_handler(ComputeResourceExhaustedError)
+async def handle_resource_exhausted(request: Request, exc: ComputeResourceExhaustedError):
+    ERROR_COUNT.labels(type='resource_exhausted').inc()
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Service temporarily unavailable due to resource constraints"}
+    )
+
+@app.exception_handler(asyncio.TimeoutError)
+async def handle_timeout(request: Request, exc: asyncio.TimeoutError):
+    ERROR_COUNT.labels(type='timeout').inc()
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Request timeout. Please try again later"}
+    )
+
+@app.exception_handler(Exception)
+async def handle_generic_exception(request: Request, exc: Exception):
+    ERROR_COUNT.labels(type='generic_error').inc()
+    # 记录异常但不暴露给客户端
+    logger.error(f"未处理的异常: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
 
 @app.get("/", response_model=HealthResponse)
 async def root():
@@ -89,17 +178,20 @@ async def create_task(request: TaskRequest, background_tasks: BackgroundTasks):
         # 在后台执行任务
         async def run_task():
             global orchestrator
+            task = asyncio.current_task()
+            active_tasks.add(task)
             try:
                 if orchestrator is None:
-                    orchestrator = AsyncRealOrchestrator(trace_id=trace_id)
+                    orchestrator = AgentOrchestrator(trace_id=trace_id)
                 await orchestrator.start_work(request.task)
                 COMPLETED_TASKS.labels(status='success').inc()
             except Exception as e:
                 ERROR_COUNT.labels(type='execution_error').inc()
                 COMPLETED_TASKS.labels(status='error').inc()
-                print(f"[API] 任务执行失败: {e}")
+                logger.error(f"任务执行失败: {e}")
             finally:
                 ACTIVE_TASKS.dec()
+                active_tasks.remove(task)
 
         background_tasks.add_task(run_task)
 
@@ -121,13 +213,13 @@ async def create_task(request: TaskRequest, background_tasks: BackgroundTasks):
                 return TaskResponse(
                     trace_id=trace_id,
                     status="completed",
-                    result=log.response
+                    result=log.response or ""
                 )
             else:
                 return TaskResponse(
                     trace_id=trace_id,
                     status="processing",
-                    result=None
+                    result=""
                 )
 
     except Exception as e:
