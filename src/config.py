@@ -158,12 +158,13 @@ class Config:
         'sla_priority': 0.15
     }
     
-    # 提级门槛配置（架构师规范命名）
-    HIGH_ENTROPY_THRESHOLD: float = 0.7        # 信息熵高阈值，触发质量提级
-    HIGH_TERM_THRESHOLD: float = 0.6           # 术语密度高阈值，触发质量提级
-    HIGH_RISK_THRESHOLD: float = 0.8           # 风险分数临界值，触发风险熔断
-    HIGH_SLA_THRESHOLD: float = 0.8            # SLA优先级高阈值，触发质量提级
-    VARIANCE_THRESHOLD: float = 0.4            # 语义波动率阈值，触发不确定性补偿
+    # 提级门槛配置（阻尼决策 - 架构师规范）
+    HIGH_QUALITY_GATE: float = 0.8             # 高质量门槛 (熵/术语密度) - 触发 L5
+    MEDIUM_QUALITY_GATE: float = 0.5           # 中等质量门槛 - 触发 L3
+    HIGH_RISK_GATE: float = 0.8                # 高风险门槛
+    HIGH_CORENESS_GATE: float = 0.6            # 高核心度门槛 (结合风险触发 L6)
+    MEDIUM_RISK_GATE: float = 0.5              # 中等风险门槛 - 触发 L4
+    HIGH_VARIANCE_GATE: float = 0.5            # 高语义方差门槛 (仅 L4+ 才生效)
     FAST_PASS_RISK_LIMIT: float = 0.2          # 快速通道风险限制
     
     # 提级门槛配置（兼容旧代码）

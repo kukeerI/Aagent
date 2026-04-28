@@ -7,6 +7,7 @@
 #   - 支持中文和英文关键词识别
 #   - 业务画像基于知识图谱的实体核心度评估
 #   - 认知画像识别任务的收敛/发散特性
+#   - 阻尼决策：从 Sum 改为 Max，普通任务稳在 L2/L3
 
 from typing import Dict, Tuple, Any, Optional, List
 import re
@@ -36,7 +37,7 @@ class IntentAnalyzer:
         list(config.MEDIUM_RISK_ACTIONS.keys()) +
         list(config.LOW_RISK_ACTIONS.keys())
     ) + r')(?:$|[\s\W])', re.IGNORECASE)
-    
+
     HIGH_QUALITY_REGEX = re.compile(r'(?:^|[\s\W])(' + '|'.join(config.HIGH_QUALITY_TERMS) + r')(?:$|[\s\W])', re.IGNORECASE)
 
     @staticmethod
@@ -245,25 +246,25 @@ class IntentAnalyzer:
         Returns:
             int: 路由级别 (1-7)
         """
-        # L7 (巅峰博弈): V>8, C>6, I>3
+        # L7（巅峰博弈): V>8, C>6, I>3
         if value > 8 and complexity > 6 and innovation > 3:
             return 7
-        # L6 (创意融合): V>8, C<=6, I>3
+        # L6（创意融合): V>8, C<=6, I>3
         elif value > 8 and complexity <= 6 and innovation > 3:
             return 6
-        # L5 (逻辑深钻): V>8, C>6, I<=3
+        # L5（逻辑深钻): V>8, C>6, I<=3
         elif value > 8 and complexity > 6 and innovation <= 3:
             return 5
-        # L4 (复杂执行): V<=8, C>6
+        # L4（复杂执行): V<=8, C>6
         elif value <= 8 and complexity > 6:
             return 4
-        # L3 (高价单发): V>8, C<=5, I<=3
+        # L3（高价单发): V>8, C<=5, I<=3
         elif value > 8 and complexity <= 5 and innovation <= 3:
             return 3
-        # L2 (标准代理): V<=8, C<=5, I<=3
+        # L2（标准代理): V<=8, C<=5, I<=3
         elif value <= 8 and complexity <= 5 and innovation <= 3:
             return 2
-        # L1 (本地吞吐): V<4, C<3
+        # L1（本地吞吐): V<4, C<3
         elif value < 4 and complexity < 3:
             return 1
         # 默认到 L2
@@ -280,16 +281,7 @@ class IntentAnalyzer:
         Returns:
             str: 路由级别中文名称
         """
-        route_names = {
-            1: "本地吞吐",
-            2: "标准代理",
-            3: "高价单发",
-            4: "复杂执行",
-            5: "逻辑深钻",
-            6: "创意融合",
-            7: "巅峰博弈"
-        }
-        return route_names.get(route_level, "标准代理")
+        return config.ROUTE_LEVEL_NAMES.get(route_level, "标准代理")
 
     # ==================== 业务画像相关方法 ====================
 
@@ -298,7 +290,7 @@ class IntentAnalyzer:
         """生成业务特征画像
 
         根据任务中的实体在知识图谱中的连接度计算核心度，
-        结合动作动词计算风险分数，以及根据领域关键词计算 SLA 级别。
+        结合动作动词计算风险分数，以及根据领域关键词计算 SLA 优先级。
 
         Args:
             task: 任务描述
@@ -309,13 +301,13 @@ class IntentAnalyzer:
         """
         # 1. 计算核心度
         coreness = await IntentAnalyzer._calculate_coreness(task, memory)
-        
+
         # 2. 计算风险分数
         risk_score = IntentAnalyzer._calculate_risk_score(task, coreness)
-        
+
         # 3. 计算 SLA 优先级
         sla_priority = IntentAnalyzer._calculate_sla_priority(task, coreness)
-        
+
         # 4. 判断是否具有时间关键性
         temporal_criticality = IntentAnalyzer._detect_temporal_criticality(task)
 
@@ -341,25 +333,25 @@ class IntentAnalyzer:
         """
         # 提取任务中的实体
         entities = memory._extract_entities_from_text(task)
-        
+
         if not entities:
             # 没有提取到实体，返回基础核心度
             return 0.1
 
         graph = memory.knowledge_graph
         max_degree = 0
-        
+
         # 批量查询实体的连接度
         for entity in entities:
             entity_name = entity["name"]
             if entity_name in graph:
-                # 获取该实体在图中的连接数（入度+出度）
+                # 获取该实体在图中的连接度（入度+出度）
                 degree = graph.degree(entity_name)
                 max_degree = max(max_degree, degree)
 
         # 归一化：假设连接数超过 CORENESS_MAX_DEGREE 即为极其核心
         coreness = min(1.0, max_degree / config.CORENESS_MAX_DEGREE)
-        
+
         return coreness
 
     @staticmethod
@@ -367,7 +359,7 @@ class IntentAnalyzer:
         """计算风险分数
 
         风险 = 动作权重 * (1 + 核心度)
-        
+
         Args:
             task: 任务描述
             coreness: 核心度分数
@@ -377,11 +369,11 @@ class IntentAnalyzer:
         """
         # 获取动作权重
         action_weight = IntentAnalyzer._get_action_weight(task)
-        
+
         # 风险计算：基础风险 * (1 + 核心度)
         # 核心度越高，相同动作的风险越大
         risk_score = action_weight * (1.0 + coreness)
-        
+
         # 归一化到 [0.0, 1.0]
         return min(1.0, max(0.0, risk_score))
 
@@ -404,12 +396,12 @@ class IntentAnalyzer:
         for action, weight in config.HIGH_RISK_ACTIONS.items():
             if action in task_lower:
                 max_weight = max(max_weight, weight)
-        
+
         # 检查中危动作
         for action, weight in config.MEDIUM_RISK_ACTIONS.items():
             if action in task_lower:
                 max_weight = max(max_weight, weight)
-        
+
         # 检查低危动作
         for action, weight in config.LOW_RISK_ACTIONS.items():
             if action in task_lower:
@@ -431,16 +423,16 @@ class IntentAnalyzer:
             float: SLA 优先级 (0.0-1.0)
         """
         base_score = 0.3  # 基础分
-        
+
         # 检查高质量领域关键词（使用简单的字符串包含检查，支持中英文混合）
         task_lower = task.lower()
         has_high_quality_term = any(term.lower() in task_lower for term in config.HIGH_QUALITY_TERMS)
         if has_high_quality_term:
             base_score += 0.5
-        
+
         # 核心度加成
         base_score += coreness * 0.2
-        
+
         # 归一化到 [0.0, 1.0]
         return min(1.0, max(0.0, base_score))
 
@@ -458,7 +450,7 @@ class IntentAnalyzer:
             "立即", "马上", "立刻", "紧急", "尽快", "限时", "deadline",
             "urgent", "immediately", "now", "as soon as possible", "within"
         ]
-        
+
         task_lower = task.lower()
         return any(keyword in task_lower for keyword in temporal_keywords)
 
@@ -479,10 +471,10 @@ class IntentAnalyzer:
         """
         # 1. 判断创新需求（发散性程度）
         innovation_requirement = IntentAnalyzer._calculate_innovation_requirement(task)
-        
+
         # 2. 计算依赖缺口
         dependency_gap = await IntentAnalyzer._calculate_dependency_gap(task, memory)
-        
+
         # 3. 判断是否为闭环任务
         is_closed_loop = IntentAnalyzer._detect_closed_loop(task)
 
@@ -507,9 +499,9 @@ class IntentAnalyzer:
         # 发散型关键词（需要创意）
         divergent_keywords = [
             "创意", "创新", "设计", "发明", "创造", "想象", "构思",
-            "creative", "innovate", "design", "invent", "create", "imagine", "brainstorm"
+            "creative", "innovative", "design", "invent", "create", "imagine", "brainstorm"
         ]
-        
+
         # 收敛型关键词（有明确答案）
         convergent_keywords = [
             "查询", "查找", "计算", "分析", "验证", "确认", "执行",
@@ -524,7 +516,7 @@ class IntentAnalyzer:
         if total == 0:
             # 默认中等创新需求
             return 0.3
-        
+
         # 发散型关键词越多，创新需求越高
         return min(1.0, divergent_count / total)
 
@@ -543,14 +535,14 @@ class IntentAnalyzer:
         """
         # 提取任务中的实体
         entities = memory._extract_entities_from_text(task)
-        
+
         if not entities:
             # 无法提取实体，依赖缺口较高
             return 0.7
 
         graph = memory.knowledge_graph
         unknown_entity_count = 0
-        
+
         # 检查实体在知识图谱中的存在情况
         for entity in entities:
             entity_name = entity["name"]
@@ -559,13 +551,13 @@ class IntentAnalyzer:
 
         # 计算未知实体比例作为依赖缺口
         dependency_gap = unknown_entity_count / len(entities)
-        
+
         # 检查是否存在疑问词（表示需要更多信息）
         question_keywords = ["什么", "如何", "为什么", "哪里", "谁", "何时",
                              "what", "how", "why", "where", "who", "when"]
         task_lower = task.lower()
         has_question = any(kw in task_lower for kw in question_keywords)
-        
+
         if has_question:
             # 有疑问词增加依赖缺口
             dependency_gap = min(1.0, dependency_gap + 0.2)
@@ -590,7 +582,7 @@ class IntentAnalyzer:
             "编写", "实现", "执行", "计算", "验证", "测试", "完成",
             "write", "implement", "execute", "calculate", "verify", "test", "complete"
         ]
-        
+
         # 开环指示词
         open_loop_keywords = [
             "讨论", "探索", "分析", "研究", "思考", "建议", "创意",
@@ -608,14 +600,20 @@ class IntentAnalyzer:
 
     @staticmethod
     def determine_route_level(profile: TaskProfile) -> Dict[str, Any]:
-        """基于多维画像的补偿决策矩阵
+        """基于多维画像的阻尼决策矩阵
 
-        决策逻辑：
+        决策逻辑（架构师规范 - 阻尼决策）：
         1. 基础级别设为 L2
-        2. 质量提级：若 entropy > 0.7 或 term_density > 0.6 或 sla_priority > 0.8，提升至 max(level, 5)
-        3. 风险熔断：若 risk_score > 0.8，提升至 max(level, 6)
-        4. 歧义补偿：若 structural_variance > 0.4，级别+1（最高L7）
-        5. 快速通道：只有 is_fast_pass=True 且 risk_score < 0.2 时，才允许分配 L1
+        2. 质量提级（基于 Max 触发，非累加）：
+           - 高质量门槛: entropy>0.8 或 term_density>0.7 → max(level,5)
+           - 中等质量: max(entropy, term_density)>0.5 → max(level,3)
+        3. 风险提级（风险必须结合核心度）：
+           - 高风险 + 高核心度: risk_score>0.8 且 coreness>0.6 → max(level,6)
+           - 中等风险: risk_score>0.5 → max(level,4)
+        4. 不确定性补偿（仅作为高阶任务微调）：
+           - structural_variance>0.5 且 level>=4 → level+1（最高 L7）
+        5. 快速通道（最高优先级拦截）：
+           - is_fast_pass 且 risk_score<0.2 → L1
 
         Args:
             profile: 任务完整画像（包含物理、业务、认知三个维度）
@@ -625,10 +623,12 @@ class IntentAnalyzer:
                 - level: 路由级别 (1-7)
                 - route_name: 路由级别名称
                 - triggers: 触发的补偿规则列表
+                - score_details: 决策审计信息
         """
-        # 1. 基础级别定义
+        # 1. 确立基准
         level = 2
         triggers = []
+        score_details = {}
 
         try:
             # 提取各项指标（带默认值处理）
@@ -636,138 +636,88 @@ class IntentAnalyzer:
             term_density = getattr(profile.physical, 'term_density', 0.0)
             structural_variance = getattr(profile.physical, 'structural_variance', 0.0)
             risk_score = getattr(profile.business, 'risk_score', 0.0)
-            sla_priority = getattr(profile.business, 'sla_priority', 0.0)
+            coreness = getattr(profile.business, 'coreness', 0.0)
             is_fast_pass = getattr(profile.cognitive, 'is_fast_pass', False)
+
+            # 记录原始得分
+            score_details["entropy"] = entropy
+            score_details["term_density"] = term_density
+            score_details["risk_score"] = risk_score
+            score_details["coreness"] = coreness
+            score_details["structural_variance"] = structural_variance
+            score_details["is_fast_pass"] = is_fast_pass
 
             # 2. 快速通道判定（必须在其他规则之前）
             if is_fast_pass and risk_score < config.FAST_PASS_RISK_LIMIT:
                 level = 1
                 triggers = ["极速分诊拦截"]
+                score_details["gate_triggered"] = "FAST_PASS_GATE"
                 logger.info(f"[Decision] 快速通道触发: is_fast_pass={is_fast_pass}, risk_score={risk_score:.2f}")
 
             else:
-                # 3. 质量/专业度提级 (针对 Nature 翻译等场景)
-                quality_reasons = []
-                if entropy > config.HIGH_ENTROPY_THRESHOLD:
-                    quality_reasons.append(f"高信息熵 ({entropy:.2f})")
-                if term_density > config.HIGH_TERM_THRESHOLD:
-                    quality_reasons.append(f"高术语密度 ({term_density:.2f})")
-                if sla_priority > config.HIGH_SLA_THRESHOLD:
-                    quality_reasons.append(f"高SLA优先级 ({sla_priority:.2f})")
-                
-                if quality_reasons:
+                # 3. 质量门槛（针对 Nature 等高质量任务 - 采用 Max 触发，非累加）
+                quality_signal = max(entropy, term_density)
+                if quality_signal > config.HIGH_QUALITY_GATE:
                     old_level = level
                     level = max(level, 5)
-                    reason_str = ", ".join(quality_reasons)
-                    triggers.append(f"质量补偿 ({reason_str})")
-                    logger.info(f"[Decision] 检测到{reason_str}，触发质量提级至 L{level}")
+                    reason = f"高质量门槛触发 (quality_signal={quality_signal:.2f})"
+                    triggers.append(reason)
+                    score_details["gate_triggered"] = "HIGH_QUALITY_GATE"
+                    logger.info(f"[Decision] {reason}, 提级到 L{level}")
+                elif quality_signal > config.MEDIUM_QUALITY_GATE:
+                    old_level = level
+                    level = max(level, 3)
+                    reason = f"中等质量门槛触发 (quality_signal={quality_signal:.2f})"
+                    triggers.append(reason)
+                    score_details["gate_triggered"] = "MEDIUM_QUALITY_GATE"
+                    logger.info(f"[Decision] {reason}, 提级到 L{level}")
 
-                # 4. 风险熔断提级 (针对核心资产修改场景)
-                if risk_score > config.HIGH_RISK_THRESHOLD:
+                # 4. 风险门槛（针对核心资产修改 - 风险必须结合核心度才有意义）
+                if risk_score > config.HIGH_RISK_GATE and coreness > config.HIGH_CORENESS_GATE:
                     old_level = level
                     level = max(level, 6)
-                    triggers.append("风险熔断 (高危核心操作)")
-                    logger.info(f"[Decision] 检测到高风险分数 ({risk_score:.2f})，触发风险熔断至 L{level}")
+                    reason = f"高风险+高核心度门槛触发 (risk={risk_score:.2f}, coreness={coreness:.2f})"
+                    triggers.append(reason)
+                    score_details["gate_triggered"] = "HIGH_RISK_GATE"
+                    logger.info(f"[Decision] {reason}, 提级到 L{level}")
+                elif risk_score > config.MEDIUM_RISK_GATE:
+                    old_level = level
+                    level = max(level, 4)
+                    reason = f"中等风险门槛触发 (risk={risk_score:.2f})"
+                    triggers.append(reason)
+                    score_details["gate_triggered"] = "MEDIUM_RISK_GATE"
+                    logger.info(f"[Decision] {reason}, 提级到 L{level}")
 
-                # 5. 不确定性补偿 (针对模糊/困难任务场景)
-                if structural_variance > config.VARIANCE_THRESHOLD:
+                # 5. 波动率补偿（仅作为高阶任务微调）
+                if structural_variance > config.HIGH_VARIANCE_GATE and level >= 4:
                     old_level = level
                     level = min(7, level + 1)
-                    triggers.append(f"不确定性补偿 (语义波动率 {structural_variance:.2f})")
-                    logger.info(f"[Decision] 检测到高语义波动率 ({structural_variance:.2f})，触发不确定性补偿，级别从 L{old_level} 提升至 L{level}")
+                    reason = f"语义方差补偿触发 (variance={structural_variance:.2f}, 仅 L4+ 生效)"
+                    triggers.append(reason)
+                    score_details["gate_triggered"] = "VARIANCE_COMPENSATION"
+                    logger.info(f"[Decision] {reason}, 从 L{old_level} 提级到 L{level}")
 
         except AttributeError as e:
-            # 画像数据不完整，降级到默认级别 L2
-            logger.warning(f"[Decision] 任务画像数据不完整: {e}，降级到默认路由 L2")
+            # 画像数据不完整，降级到默认路由 L2
+            logger.warning(f"[Decision] 任务画像数据不完整: {e}, 降级到默认路由 L2")
             level = 2
             triggers = ["画像数据不完整，使用默认路由"]
+            score_details["gate_triggered"] = "FALLBACK_GATE"
 
         # 6. 边界限制（确保级别在 [1,7] 范围内）
         level = max(1, min(7, level))
 
         # 7. 路由名称映射
         route_mapping = config.ROUTE_LEVEL_NAMES
-        route_name = route_mapping.get(level, "Unknown")
+        route_name = route_mapping.get(level, "标准代理")
 
         # 审计日志
         logger.info(f"[Decision] 任务画像路由完成: Level {level} ({route_name}), 触发规则: {', '.join(triggers)}")
+        logger.debug(f"[Decision] 得分详情: {score_details}")
 
         return {
             "level": level,
             "route_name": route_name,
-            "triggers": triggers
+            "triggers": triggers,
+            "score_details": score_details
         }
-
-    @staticmethod
-    def _calculate_segment_boost(value: float, dimension_name: str, max_boost: int = 2) -> int:
-        """分段映射计算加分
-
-        分段规则：
-        - 0.0-0.4 -> 0级（保持基础）
-        - 0.4-0.7 -> 1级
-        - 0.7-1.0 -> 2级（但受max_boost限制）
-
-        Args:
-            value: 维度值 (0.0-1.0)
-            dimension_name: 维度名称（用于日志）
-            max_boost: 最大加分级数
-
-        Returns:
-            int: 加分级数
-        """
-        if value < 0.4:
-            return 0
-        elif value < 0.7:
-            return min(1, max_boost)
-        else:
-            return min(2, max_boost)
-
-    @staticmethod
-    def _calculate_base_level(profile: TaskProfile, weights: Dict[str, float]) -> int:
-        """计算基础路由级别
-
-        根据任务画像的各项指标加权计算基础级别。
-
-        Args:
-            profile: 任务完整画像
-            weights: 各项指标的权重配置
-
-        Returns:
-            int: 基础路由级别 (1-7)
-        """
-        # 提取各项指标（带默认值处理）
-        entropy = getattr(profile.physical, 'entropy', 0.0)
-        term_density = getattr(profile.physical, 'term_density', 0.0)
-        coreness = getattr(profile.business, 'coreness', 0.0)
-        risk_score = getattr(profile.business, 'risk_score', 0.0)
-        sla_priority = getattr(profile.business, 'sla_priority', 0.0)
-        innovation_requirement = getattr(profile.cognitive, 'innovation_requirement', 0.0)
-
-        # 加权计算综合分数
-        # 基础分 + 各项指标加权
-        base_score = 2  # 基础级别为 L2
-        score = base_score
-        
-        # 信息熵贡献
-        score += entropy * weights.get('entropy', 0.3) * 3
-        
-        # 术语密度贡献
-        score += term_density * weights.get('term_density', 0.2) * 3
-        
-        # 核心度贡献
-        score += coreness * weights.get('coreness', 0.2) * 2
-        
-        # 风险分数贡献
-        score += risk_score * weights.get('risk_score', 0.15) * 2
-        
-        # SLA优先级贡献
-        score += sla_priority * weights.get('sla_priority', 0.15) * 2
-        
-        # 创新需求贡献
-        score += innovation_requirement * 2
-
-        # 转换为整数级别并限制范围
-        level = int(round(score))
-        
-        # 确保级别在合理范围内
-        return max(1, min(7, level))
