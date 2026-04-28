@@ -8,7 +8,7 @@
 #   - 敏感配置（如 API Key）应通过环境变量传入，不硬编码在此文件
 
 import os
-from typing import Optional
+from typing import Optional, List
 
 
 class Config:
@@ -46,6 +46,8 @@ class Config:
     DEFAULT_ERROR_HANDLING_MODEL: str = os.getenv("DEFAULT_ERROR_HANDLING_MODEL", "google/gemma-3-12b-it")
     # 并发模型数量，用于四步评审等并发场景
     ENSEMBLE_SIZE: int = int(os.getenv("ENSEMBLE_SIZE", "3"))
+    # 嵌入模型配置
+    EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
 
     # 沙箱配置
     DOCKER_ENABLED: bool = os.getenv("DOCKER_ENABLED", "True").lower() == "true"
@@ -83,6 +85,18 @@ class Config:
         'socket', 'urllib', 'http', 'requests', 'tempfile',
         'pathlib', 'glob', 'io', 'builtins', '__import__'
     }
+
+    # Fast Pass 模式配置
+    # 用于极速层分诊，短且符合正则模式的任务直接跳过深度分析
+    FAST_PASS_PATTERNS: List[str] = [
+        r'^\s*(你好|hello|hi|您好|早上好|下午好|晚上好)\s*$',
+        r'^\s*(谢谢|thank you|thanks)\s*$',
+        r'^\s*(再见|bye|拜拜|再见了)\s*$',
+        r'^\s*(好的|好|ok|okay|知道了|明白了)\s*$',
+        r'^\s*(是|不是|对|不对|是的|不是的)\s*$',
+        r'^\s*(\?|\？)\s*$',
+        r'^\s*$'
+    ]
 
 
 # 创建全局配置实例，供整个应用使用

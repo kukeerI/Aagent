@@ -19,23 +19,25 @@ from src.core.exceptions import (
     CodeExecutionError,
     TimeoutError
 )
-
-logger = __import__('src.utils.logger', fromlist=['logger']).logger
+from src.utils.logger import logger
 
 
 class AgentExecutor:
     """任务执行器 - 提供任务执行、研究、创作等多种执行能力"""
 
-    def __init__(self, trace_id: str = None, mcp_server_url: Optional[str] = None):
+    def __init__(self, trace_id: str = None, mcp_server_url: Optional[str] = None, 
+                 gateway: Optional[AsyncGateway] = None, sandbox: Optional[DockerSandbox] = None):
         """初始化执行器
 
         Args:
             trace_id: 追踪 ID，用于日志关联
             mcp_server_url: MCP 服务器地址，为空则不使用 MCP 工具
+            gateway: 网关实例，用于依赖注入（可选）
+            sandbox: 沙箱实例，用于依赖注入（可选）
         """
         self.trace_id = trace_id
-        self.gateway = AsyncGateway(trace_id=trace_id)
-        self.sandbox = DockerSandbox()
+        self.gateway = gateway or AsyncGateway(trace_id=trace_id)
+        self.sandbox = sandbox or DockerSandbox()
         self.mcp_client = MCPClient(mcp_server_url) if mcp_server_url else None
         self.tools = []
         self.local_client = None
@@ -49,9 +51,9 @@ class AgentExecutor:
         if self.mcp_client:
             try:
                 self.tools = await self.mcp_client.discover_tools()
-                logger.info(f"[Executor] 已发现 {len(self.tools)} 个 MCP 工具")
+                logger.info(f"[Executor] [{self.trace_id}] 已发现 {len(self.tools)} 个 MCP 工具")
             except MCPError as e:
-                logger.error(f"[Executor] 发现 MCP 工具失败: {e}")
+                logger.error(f"[Executor] [{self.trace_id}] 发现 MCP 工具失败: {e}")
 
     async def execute_task(self, task: str, task_type: str) -> str:
         """执行任务
@@ -105,10 +107,10 @@ class AgentExecutor:
 
             return response.content
         except MCPError as e:
-            logger.error(f"[MCP Execution Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] MCP 执行失败: {e}")
             return await self._execute_with_gateway(task, task_type)
         except Exception as e:
-            logger.error(f"[Execution Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] 执行错误: {e}")
             local_response = await self._try_local_model(messages)
             if local_response:
                 return f"[本地模型] {local_response}"
@@ -140,7 +142,7 @@ class AgentExecutor:
                 domain_skill="Execution"
             )
         except Exception as e:
-            logger.error(f"[Execution Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] 网关执行失败: {e}")
             local_response = await self._try_local_model(messages)
             if local_response:
                 return f"[本地模型] {local_response}"
@@ -258,10 +260,10 @@ class AgentExecutor:
 
             return response.content
         except MCPError as e:
-            logger.error(f"[MCP Research Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] MCP 研究失败: {e}")
             return await self._research_with_gateway(topic)
         except Exception as e:
-            logger.error(f"[Research Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] 研究错误: {e}")
             local_response = await self._try_local_model(messages)
             if local_response:
                 return f"[本地模型] {local_response}"
@@ -292,7 +294,7 @@ class AgentExecutor:
                 domain_skill="Research"
             )
         except Exception as e:
-            logger.error(f"[Research Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] 网关研究失败: {e}")
             local_response = await self._try_local_model(messages)
             if local_response:
                 return f"[本地模型] {local_response}"
@@ -348,10 +350,10 @@ class AgentExecutor:
 
             return response.content
         except MCPError as e:
-            logger.error(f"[MCP Creation Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] MCP 创建失败: {e}")
             return await self._create_with_gateway(request)
         except Exception as e:
-            logger.error(f"[Creation Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] 创建错误: {e}")
             local_response = await self._try_local_model(messages)
             if local_response:
                 return f"[本地模型] {local_response}"
@@ -382,7 +384,7 @@ class AgentExecutor:
                 domain_skill="Creative"
             )
         except Exception as e:
-            logger.error(f"[Creation Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] 网关创建失败: {e}")
             local_response = await self._try_local_model(messages)
             if local_response:
                 return f"[本地模型] {local_response}"
@@ -415,8 +417,8 @@ class AgentExecutor:
             )
             return response.choices[0].message.content
         except asyncio.TimeoutError:
-            logger.error("[Local Model Error] 本地模型请求超时")
+            logger.error(f"[Executor] [{self.trace_id}] 本地模型请求超时")
             raise TimeoutError("本地模型请求超时")
         except Exception as e:
-            logger.error(f"[Local Model Error] {e}")
+            logger.error(f"[Executor] [{self.trace_id}] 本地模型错误: {e}")
             raise ModelInferenceError(f"本地模型推理失败: {str(e)}")

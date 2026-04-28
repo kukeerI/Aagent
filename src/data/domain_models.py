@@ -6,7 +6,7 @@
 #   - 枚举值可以在序列化时自动转换
 #   - 所有时间字段使用 ISO 格式
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Dict, Any, List
 from enum import Enum
 from datetime import datetime
@@ -265,3 +265,101 @@ class ExecutionResult(BaseModel):
     result: Optional[str] = None           # 执行结果
     error: Optional[str] = None            # 错误信息
     steps: Optional[List[Dict[str, Any]]] = None  # 执行步骤详情
+
+
+class BaseProfile(BaseModel):
+    """画像基类
+
+    所有画像类的基类，提供统一的配置：
+    - extra='forbid': 禁止额外字段，确保数据结构严格符合定义
+    - frozen=True: 锁定属性，防止运行时篡改，提高性能和数据一致性
+    """
+    model_config = ConfigDict(extra='forbid', frozen=True)
+
+
+class TaskPhysicalProfile(BaseProfile):
+    """任务物理特征画像
+
+    描述任务的物理特征指纹，决定"它看起来多重"。
+    这些特征在任务分析完成后不再变化，因此使用 frozen=True。
+    """
+    size: int = Field(..., description="原始输入字符长度")
+    entropy: float = Field(
+        0.0, 
+        ge=0, le=1, 
+        description="信息熵/压缩比，反映文本信息密度。0.0 表示高度重复/低信息，1.0 表示信息密度极高"
+    )
+    term_density: float = Field(
+        0.0, 
+        ge=0, le=1, 
+        description="术语/罕见词密度，反映领域深度。0.0 表示无专业术语，1.0 表示高度专业"
+    )
+    structural_variance: float = Field(
+        0.0, 
+        ge=0, le=1, 
+        description="语义方差，反映表述的不确定性。0.0 表示表述清晰确定，1.0 表示高度模糊"
+    )
+
+
+class TaskBusinessProfile(BaseProfile):
+    """任务业务特征画像
+
+    描述任务的业务/社会特征，决定"它有多贵/多险"。
+    """
+    coreness: float = Field(
+        0.0, 
+        ge=0, le=1, 
+        description="与核心代码或资产的关联度。0.0 表示无关联，1.0 表示直接涉及核心资产"
+    )
+    risk_score: float = Field(
+        0.0, 
+        ge=0, le=1, 
+        description="操作风险分值，反映失败后果的严重性。0.0 表示无风险，1.0 表示高危操作"
+    )
+    sla_priority: float = Field(
+        0.0, 
+        ge=0, le=1, 
+        description="质量门槛要求，Nature 级任务此项必高。0.0 表示低要求，1.0 表示最高要求"
+    )
+    temporal_criticality: bool = Field(
+        False, 
+        description="是否具有极强的实时性要求"
+    )
+
+
+class TaskCognitiveProfile(BaseProfile):
+    """任务认知特征画像
+
+    描述任务的认知特征，决定"它需要什么样的执行策略"。
+    """
+    innovation_requirement: float = Field(
+        0.0, 
+        ge=0, le=1, 
+        description="发散性/创意需求程度。0.0 表示常规任务，1.0 表示高度创新需求"
+    )
+    dependency_gap: float = Field(
+        0.0, 
+        ge=0, le=1, 
+        description="上下文缺失度，反映是否需要额外追问。0.0 表示信息完整，1.0 表示严重缺失"
+    )
+    is_closed_loop: bool = Field(
+        True, 
+        description="是否为确定性的闭环执行任务。True 表示有明确答案，False 表示开放式探索"
+    )
+
+
+class TaskProfile(BaseModel):
+    """任务完整画像集成
+
+    任务的三维画像整合，包含物理、业务、认知三个维度。
+    画像应该是纯净的、可序列化的 JSON 对象，方便存入数据库或日志进行审计。
+    """
+    physical: TaskPhysicalProfile
+    business: TaskBusinessProfile
+    cognitive: TaskCognitiveProfile
+    
+    # 辅助元数据
+    trace_id: str
+    timestamp: float
+
+    model_config = ConfigDict(extra='forbid')

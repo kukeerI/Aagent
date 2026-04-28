@@ -1,6 +1,6 @@
 # src/core/pipelines/stages.py
 # 管道阶段
-# 依赖：abc, typing, src.data.domain_models, src.services.tracing
+# 依赖：abc, typing, src.data.domain_models, src.services.tracing, src.utils.logger, src.services.gateway
 # 注意事项：
 #   - 定义了管道的各个处理阶段
 #   - 所有阶段都继承自 Stage 基类
@@ -9,8 +9,9 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
-from src.data.domain_models import AgentTask
+from src.data.domain_models import AgentTask, RouteLevel
 from src.services.tracing import tracing
+from src.utils.logger import logger
 
 
 class Stage(ABC):
@@ -61,14 +62,12 @@ class ContextRetrievalStage(Stage):
         with tracing.start_span("context_retrieval.execute", attributes={
             "trace_id": task.trace_id
         }) as span:
-            print(f"\n[{task.trace_id}] ========================================")
-            print(f"[{task.trace_id}] 开始上下文检索阶段")
-            print(f"[{task.trace_id}] ========================================")
+            logger.info(f"[{task.trace_id}] 开始上下文检索阶段")
 
             # 这里可以添加上下文检索逻辑
             # 例如从数据库或缓存中获取历史上下文
 
-            print(f"[{task.trace_id}] 上下文检索完成")
+            logger.info(f"[{task.trace_id}] 上下文检索完成")
             return task
 
 
@@ -95,20 +94,18 @@ class TaskAnalysisStage(Stage):
         with tracing.start_span("task_analysis.execute", attributes={
             "trace_id": task.trace_id
         }) as span:
-            print(f"\n[{task.trace_id}] ========================================")
-            print(f"[{task.trace_id}] 开始任务分析阶段")
-            print(f"[{task.trace_id}] ========================================")
+            logger.info(f"[{task.trace_id}] 开始任务分析阶段")
 
             # 分析任务
             from src.core.task_analyzer import task_analyzer
             semantic_data = await task_analyzer.extract_semantic_data(task.user_input)
 
-            # 分析意图
+            # 分析路由
             from src.core.intent_analyzer import IntentAnalyzer
             intent_data = IntentAnalyzer.analyze_intent(task.user_input, semantic_data)
 
             # 转换为 IntentAnalysis 对象
-            from src.data.domain_models import IntentAnalysis, RouteLevel
+            from src.data.domain_models import IntentAnalysis
             intent_analysis = IntentAnalysis(
                 value=intent_data["value"],
                 complexity=intent_data["complexity"],
@@ -122,9 +119,7 @@ class TaskAnalysisStage(Stage):
             task.extracted_intent = intent_analysis
             task.routing_tier = RouteLevel(intent_data["route_level"])
 
-            print(f"[{task.trace_id}] 任务分析完成")
-            print(f"  路由级别: {task.routing_tier.value}")
-            print(f"  路由名称: {intent_data['route_name']}")
+            logger.info(f"[{task.trace_id}] 任务分析完成 - 路由级别: {task.routing_tier.value}, 路由名称: {intent_data['route_name']}")
 
             return task
 
@@ -152,21 +147,18 @@ class RoutingStage(Stage):
         with tracing.start_span("routing.execute", attributes={
             "trace_id": task.trace_id
         }) as span:
-            print(f"\n[{task.trace_id}] ========================================")
-            print(f"[{task.trace_id}] 开始路由阶段")
-            print(f"[{task.trace_id}] ========================================")
+            logger.info(f"[{task.trace_id}] 开始路由阶段")
 
             # 基于任务分析结果选择路由
             if task.routing_tier:
                 # 这里可以添加更复杂的路由逻辑
-                print(f"[{task.trace_id}] 路由选择: 级别 {task.routing_tier.value}")
+                logger.info(f"[{task.trace_id}] 路由选择: 级别 {task.routing_tier.value}")
             else:
                 # 默认路由
-                from src.data.domain_models import RouteLevel
                 task.routing_tier = RouteLevel(2)  # 标准智能体
-                print(f"[{task.trace_id}] 路由选择: 默认级别 2")
+                logger.info(f"[{task.trace_id}] 路由选择: 默认级别 2")
 
-            print(f"[{task.trace_id}] 路由完成")
+            logger.info(f"[{task.trace_id}] 路由完成")
             return task
 
 
@@ -187,7 +179,7 @@ class ExecutionStage(Stage):
     async def execute(self, task: AgentTask) -> AgentTask:
         """执行任务
 
-        使用选择的策略和模型执行任务处理。
+        使用选择的策略和模型执行任务处理，支持降级机制。
 
         Args:
             task: 智能体任务对象
@@ -201,9 +193,7 @@ class ExecutionStage(Stage):
         with tracing.start_span("execution.execute", attributes={
             "trace_id": task.trace_id
         }) as span:
-            print(f"\n[{task.trace_id}] ========================================")
-            print(f"[{task.trace_id}] 开始执行阶段")
-            print(f"[{task.trace_id}] ========================================")
+            logger.info(f"[{task.trace_id}] 开始执行阶段")
 
             # 获取模型池
             from src.services.gateway import Gateway
@@ -218,13 +208,16 @@ class ExecutionStage(Stage):
                 {"role": "user", "content": task.user_input}
             ]
 
-            # 执行策略
-            result = await strategy.execute(messages, model_pool, task.trace_id)
+            # 执行策略（带降级机制）
+            route_level = task.routing_tier.value if task.routing_tier else 2
+            result = await self.strategy_factory.execute_with_fallback(
+                strategy, messages, model_pool, task.trace_id, route_level
+            )
 
             # 更新任务
             task.final_answer = result
 
-            print(f"[{task.trace_id}] 执行完成")
+            logger.info(f"[{task.trace_id}] 执行完成")
             return task
 
 
@@ -251,14 +244,12 @@ class CritiqueAndRefinementStage(Stage):
         with tracing.start_span("critique.execute", attributes={
             "trace_id": task.trace_id
         }) as span:
-            print(f"\n[{task.trace_id}] ========================================")
-            print(f"[{task.trace_id}] 开始评审和改进阶段")
-            print(f"[{task.trace_id}] ========================================")
+            logger.info(f"[{task.trace_id}] 开始评审和改进阶段")
 
             # 这里可以添加评审和改进逻辑
             # 例如检查回答的质量、准确性等
 
-            print(f"[{task.trace_id}] 评审和改进完成")
+            logger.info(f"[{task.trace_id}] 评审和改进完成")
             return task
 
 
@@ -285,12 +276,10 @@ class FinalizationStage(Stage):
         with tracing.start_span("finalization.execute", attributes={
             "trace_id": task.trace_id
         }) as span:
-            print(f"\n[{task.trace_id}] ========================================")
-            print(f"[{task.trace_id}] 开始最终阶段")
-            print(f"[{task.trace_id}] ========================================")
+            logger.info(f"[{task.trace_id}] 开始最终阶段")
 
             # 这里可以添加最终处理逻辑
             # 例如保存任务结果、清理资源等
 
-            print(f"[{task.trace_id}] 最终处理完成")
+            logger.info(f"[{task.trace_id}] 最终处理完成")
             return task

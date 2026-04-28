@@ -9,6 +9,8 @@
 #   ├── StateMachineError - 状态机错误
 #   ├── CheckpointError - 检查点错误
 #   ├── TaskAnalysisError - 任务分析错误
+#   │   ├── TaskRiskEscalation - 任务风险熔断
+#   │   └── ProfileInconsistencyError - 画像不一致
 #   ├── GatewayError - 网关错误
 #   ├── ConfigurationError - 配置错误
 #   ├── TimeoutError - 超时错误
@@ -78,6 +80,24 @@ class TaskAnalysisError(AagentException):
     """
     pass
 
+
+class TaskRiskEscalation(TaskAnalysisError):
+    """任务风险触发强制熔断/提级异常
+
+    当任务的风险评分超过阈值时抛出，触发熔断机制或升级处理流程。
+    例如：risk_score >= 0.9 的高危操作需要人工确认。
+    """
+    pass
+
+
+class ProfileInconsistencyError(TaskAnalysisError):
+    """画像数据不一致错误
+
+    当任务画像的各维度评分存在逻辑矛盾时抛出。
+    例如：物理特征极高（如超长文本）但业务评分极低，可能存在伪装任务。
+    """
+    pass
+
 class GatewayError(AagentException):
     """网关异常
 
@@ -115,5 +135,14 @@ class ValidationError(AagentException):
     - 输入参数验证失败
     - 状态转换验证失败
     - 数据完整性验证失败
+    """
+    pass
+
+
+class StrategyFallbackError(AagentException):
+    """策略降级异常
+
+    当当前策略执行失败需要降级到其他策略时抛出。
+    StrategyFactory 会捕获此异常并尝试使用降级策略。
     """
     pass
