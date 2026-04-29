@@ -10,6 +10,7 @@ from .react_loop import ReactLoopStrategy
 from .plan_and_solve import PlanAndSolveStrategy
 from .reflexion import ReflexionStrategy
 from .strategy_factory import StrategyFactory
+from .strategy_selector import StrategySelector, ExecutionPlan
 
 __all__ = [
     "ReasoningStrategy",
@@ -18,5 +19,7 @@ __all__ = [
     "ReactLoopStrategy",
     "PlanAndSolveStrategy",
     "ReflexionStrategy",
-    "StrategyFactory"
+    "StrategyFactory",
+    "StrategySelector",
+    "ExecutionPlan"
 ]

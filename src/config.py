@@ -247,6 +247,93 @@ class Config:
 
         return base_prototypes
 
+    def get_model_config(self, level, is_fallback: bool = False) -> dict:
+        """
+        根据路由级别获取模型配置
+        
+        Args:
+            level: 路由级别 (RoutingLevel)
+            is_fallback: 是否为降级模式
+            
+        Returns:
+            dict: 模型配置，包含名称、URL、参数等
+        """
+        # 降级模型配置（本地模型）
+        fallback_model = {
+            "name": "local-deepseek",
+            "url": self.LM_STUDIO_URL,
+            "model_id": "deepseek-chat",
+            "max_tokens": 4096,
+            "temperature": 0.7,
+            "is_local": True
+        }
+        
+        # 如果是降级模式，直接返回本地模型
+        if is_fallback:
+            return fallback_model
+        
+        # 根据路由级别选择模型
+        level_model_map = {
+            1: {
+                "name": "local-fast",
+                "url": self.LM_STUDIO_URL,
+                "model_id": "gemma-2-9b-it",
+                "max_tokens": 2048,
+                "temperature": 0.3,
+                "is_local": True
+            },
+            2: {
+                "name": "standard-proxy",
+                "url": self.LM_STUDIO_URL,
+                "model_id": self.DEFAULT_EXECUTION_MODEL,
+                "max_tokens": 4096,
+                "temperature": 0.5,
+                "is_local": True
+            },
+            3: {
+                "name": "thoughtful-reply",
+                "url": self.LM_STUDIO_URL,
+                "model_id": self.DEFAULT_EXECUTION_MODEL,
+                "max_tokens": 8192,
+                "temperature": 0.6,
+                "is_local": True
+            },
+            4: {
+                "name": "complex-execution",
+                "url": self.LM_STUDIO_URL,
+                "model_id": self.DEFAULT_EXECUTION_MODEL,
+                "max_tokens": 8192,
+                "temperature": 0.7,
+                "is_local": True
+            },
+            5: {
+                "name": "logic-deep-dive",
+                "url": self.LM_STUDIO_URL,
+                "model_id": self.DEFAULT_RESEARCH_MODEL,
+                "max_tokens": 16384,
+                "temperature": 0.8,
+                "is_local": True
+            },
+            6: {
+                "name": "creative-review",
+                "url": self.LM_STUDIO_URL,
+                "model_id": self.DEFAULT_CREATIVE_MODEL,
+                "max_tokens": 16384,
+                "temperature": 0.9,
+                "is_local": True
+            },
+            7: {
+                "name": "peak-game",
+                "url": self.LM_STUDIO_URL,
+                "model_id": self.DEFAULT_CREATIVE_MODEL,
+                "max_tokens": 32768,
+                "temperature": 1.0,
+                "is_local": True
+            }
+        }
+        
+        return level_model_map.get(level.value, level_model_map[2])
+
 
 # 创建全局配置实例，供整个应用使用
 config = Config()

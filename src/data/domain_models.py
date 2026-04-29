@@ -389,3 +389,18 @@ class TaskProfile(BaseModel):
     )
 
     model_config = ConfigDict(extra='forbid')
+
+
+class RouteDecision(BaseModel):
+    """决策审计模型 - 确保每一行路由都有据可查
+
+    记录路由决策的完整信息，支持决策审计和可解释性分析。
+    """
+    final_level: RoutingLevel
+    source: str                    # "HardGate: Name" 或 "VectorMatch"
+    reason: str
+    latency_ms: float              # 路由决策耗时（毫秒）
+    confidence: float              # 决策置信度（0.0-1.0）
+    distance_map: Optional[Dict[str, float]] = None  # 向量距离分布
+    score_details: Optional[Dict[str, Any]] = None   # 原始特征得分
+    initial_level: Optional[RoutingLevel] = None     # 初始匹配级别
