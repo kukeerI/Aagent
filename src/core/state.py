@@ -468,9 +468,12 @@ class AgentStateMachine(StateMachine):
             return Command(type=CommandType.COMPLETE)
 
     async def _error_handler(self, task: AgentTask) -> Command:
-        """错误处理器
-
-        处理执行过程中的错误，包括资源耗尽错误的特殊处理。
+        """强化版错误处理器：支持状态回溯与带状态重试
+        
+        实现 Agent 自愈能力：
+        1. 利用 CheckpointManager 获取历史健康状态进行回档
+        2. 动态重试计数，防止无限死循环
+        3. 注入 retry 标记供 PromptManager 切换策略
 
         Args:
             task: 智能体任务对象
@@ -479,22 +482,98 @@ class AgentStateMachine(StateMachine):
             Command: 下一步命令
         """
         from src.services.tracing import tracing
-        with tracing.start_span("state.error", attributes={
-            "error_message": task.error or "Unknown error"
-        }):
-            error = task.error or "Unknown error"
-            print(f"[Error] {error}")
+        from src.utils.logger import logger
 
-            # 检查是否是资源耗尽错误
-            if "ComputeResourceExhaustedError" in str(error) or "高阶算力池已耗尽" in str(error):
-                print("[StateMachine] 检测到资源耗尽错误，将任务挂起")
+        MAX_RETRIES = 3
+        current_retries = task.context.get("retry_count", 0)
+        error_msg = task.error or "Unknown error"
+
+        with tracing.start_span("state.error", attributes={
+            "error_message": error_msg,
+            "retry_count": current_retries
+        }):
+            logger.error(f"[StateMachine] 发生错误: {error_msg} | 当前重试次数: {current_retries}/{MAX_RETRIES}")
+
+            # 1. 致命错误直接挂起（如资源耗尽）
+            fatal_keywords = [
+                "ComputeResourceExhaustedError",
+                "高阶算力池已耗尽",
+                "RateLimitError",
+                "InsufficientQuotaError"
+            ]
+            if any(kw in error_msg for kw in fatal_keywords):
+                logger.warning("[StateMachine] 检测到致命/资源耗尽错误，直接挂起")
                 return Command(type=CommandType.SUSPEND, next_state=TaskState.SUSPEND)
 
+            # 2. 评估是否允许回溯重试
+            if current_retries < MAX_RETRIES:
+                try:
+                    logger.info(f"[StateMachine] 尝试第 {current_retries + 1} 次回溯自愈...")
+                    checkpoints = await self.checkpoint_manager.list_checkpoints(
+                        task.trace_id or ""
+                    )
+
+                    if checkpoints and len(checkpoints) >= 2:
+                        # 按时间戳排序，找最近的非 ERROR 状态检查点（跳过当前 ERROR 检查点）
+                        sorted_cps = sorted(checkpoints, key=lambda x: x.timestamp, reverse=True)
+                        # 排除 ERROR 状态，找到上一个健康检查点
+                        healthy_cps = [
+                            cp for cp in sorted_cps
+                            if cp.state_name not in (TaskState.ERROR.value, TaskState.SUSPEND.value)
+                        ]
+                        if not healthy_cps and len(sorted_cps) > 1:
+                            # 如果没有健康的，退而取倒数第二个
+                            last_healthy_cp = sorted_cps[1]
+                        elif healthy_cps:
+                            last_healthy_cp = healthy_cps[0]
+                        else:
+                            raise ValueError("没有可用的健康检查点")
+
+                        # 恢复状态上下文
+                        restored_context = last_healthy_cp.context.copy()
+                        restored_context["retry_count"] = current_retries + 1
+                        restored_context["is_retry_mode"] = True
+                        restored_context["last_error"] = error_msg
+
+                        # 回写 task 的 context（保留其他字段不变，仅更新 context）
+                        task.context = restored_context
+
+                        # 确定回档目标状态（init 不可直接作为 COMMAND，兜底到 ANALYZE）
+                        rollback_state = last_healthy_cp.state_name
+                        if rollback_state == TaskState.INIT.value:
+                            rollback_state = TaskState.ANALYZE.value
+
+                        logger.info(
+                            f"[StateMachine] 成功回档至状态: {last_healthy_cp.state_name}"
+                            f" → 重新进入: {rollback_state}"
+                        )
+
+                        return Command(
+                            type=CommandType(rollback_state),
+                            next_state=rollback_state
+                        )
+                    else:
+                        logger.warning(
+                            f"[StateMachine] 检查点不足 (共 {len(checkpoints)} 个)，"
+                            f"无法回档，进入兜底处理"
+                        )
+                except Exception as rollback_err:
+                    logger.error(f"[StateMachine] 状态回溯彻底失败: {rollback_err}")
+
+            # 3. 超过重试次数或回溯失败，执行兜底错误处理
+            logger.warning(f"[StateMachine] 重试已达上限 ({current_retries}/{MAX_RETRIES})，执行兜底错误处理")
             try:
-                error_response = await self.orchestrator._handle_error(error)
-                task.final_answer = f"任务执行失败: {error}\n\n解决方案: {error_response}"
-            except Exception as e:
-                task.final_answer = f"任务执行失败: {error}\n\n错误处理也失败: {str(e)}"
+                error_response = await self.orchestrator._handle_error(error_msg)
+                task.final_answer = (
+                    f"任务多次尝试后失败 (重试 {current_retries} 次): {error_msg}\n\n"
+                    f"诊断建议: {error_response}"
+                )
+            except Exception as fallback_err:
+                task.final_answer = (
+                    f"系统严重异常: {error_msg}\n"
+                    f"兜底处理异常: {fallback_err}"
+                )
+
             return Command(type=CommandType.COMPLETE)
 
     async def _complete_handler(self, task: AgentTask) -> Command:

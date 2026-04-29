@@ -166,6 +166,7 @@ class AgentTask(BaseModel):
     extracted_intent: Optional[IntentAnalysis] = None  # 意图分析结果
     semantic_data: Optional[SemanticData] = None # 语义数据
     previous_context: Optional[Dict[str, Any]] = None  # 上一轮上下文
+    context: Dict[str, Any] = Field(default_factory=dict)  # 运行时上下文字典（重试计数、模式标记等）
     final_answer: Optional[str] = None           # 最终答案
     error: Optional[str] = None                  # 错误信息
     model_used: Optional[str] = None             # 使用的模型
