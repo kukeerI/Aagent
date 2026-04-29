@@ -647,6 +647,63 @@ class AsyncGateway:
             metadata={"model": "unknown"}
         )
 
+    async def call(self, model: dict, messages: List[Dict[str, str]], trace_id: str = None) -> str:
+        """统一调用接口
+        
+        提供统一的模型调用接口，支持超时控制、重试和 Token 统计。
+        
+        Args:
+            model: 模型配置字典，包含 base_url, api_key, model_name
+            messages: 消息列表
+            trace_id: 追踪 ID
+            
+        Returns:
+            str: 模型响应
+            
+        Raises:
+            TimeoutError: 请求超时时抛出
+            ModelInferenceError: 模型推理失败时抛出
+        """
+        import httpx
+        start_time = time.time()
+        model_name = model.get("model_name", "unknown")
+        base_url = model.get("base_url", config.LM_STUDIO_URL)
+        api_key = model.get("api_key", "lm-studio")
+        
+        try:
+            logger.info(f"[{trace_id}] 调用模型 {model_name} (超时: {config.REQUEST_TIMEOUT}s)")
+            http_client = httpx.AsyncClient(timeout=config.REQUEST_TIMEOUT)
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                http_client=http_client
+            )
+            
+            # 获取温度设置（默认 0.7）
+            temperature = model.get("temperature", 0.7)
+            max_tokens = model.get("max_tokens", 4096)
+            
+            response = await client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens
+            )
+            
+            elapsed_time = time.time() - start_time
+            logger.info(f"[{trace_id}] 模型调用成功，耗时: {elapsed_time:.2f}s")
+            return response.choices[0].message.content
+            
+        except asyncio.TimeoutError:
+            elapsed_time = time.time() - start_time
+            logger.error(f"[{trace_id}] 模型调用超时 (耗时: {elapsed_time:.2f}s): {model_name}")
+            raise TimeoutError(f"调用模型 {model_name} 超时")
+        except Exception as e:
+            elapsed_time = time.time() - start_time
+            logger.error(f"[{trace_id}] 模型调用失败 (耗时: {elapsed_time:.2f}s): {e}")
+            raise ModelInferenceError(f"模型推理失败: {str(e)}")
+
     def get_prompt(self, domain_skill: str = "default") -> str:
         """获取Prompt
 
