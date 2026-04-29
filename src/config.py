@@ -166,6 +166,8 @@ class Config:
     MEDIUM_RISK_GATE: float = 0.5              # 中等风险门槛 - 触发 L4
     HIGH_VARIANCE_GATE: float = 0.5            # 高语义方差门槛 (仅 L4+ 才生效)
     FAST_PASS_RISK_LIMIT: float = 0.2          # 快速通道风险限制
+    HIGH_SLA_THRESHOLD: float = 0.8            # 高SLA门槛 - 金融/法律合规任务触发 L5
+    HIGH_GAP_THRESHOLD: float = 0.6            # 高依赖缺口门槛 - 触发 L4
     
     # 提级门槛配置（兼容旧代码）
     ROUTE_THRESHOLDS: dict = {
@@ -182,6 +184,22 @@ class Config:
         'nature_min_level': 4,        # Nature级任务最低级别
         'critical_min_level': 6       # 高危任务最低级别
     }
+    
+    # 路由级别原型向量 (架构师金标准)
+    # 格式: [熵 (entropy), 术语密度 (term_density), 核心度 (coreness), 风险 (risk_score)]
+    ROUTE_PROTOTYPES: dict = {
+        1: [0.1, 0.1, 0.1, 0.0],      # L1 极速分诊: 极简/无险/闭环
+        2: [0.3, 0.2, 0.2, 0.2],      # L2 标准代理: 清晰/常规/低危/确定
+        3: [0.5, 0.3, 0.3, 0.3],      # L3 思考回复: 中密/关注/可控/微量缺口
+        4: [0.6, 0.5, 0.5, 0.5],      # L4 复杂执行: 逻辑链/业务关联/中危/工具调用
+        5: [0.8, 0.9, 0.2, 0.4],      # L5 逻辑深钻: 高熵/高SLA/低危/深度推理
+        6: [0.5, 0.4, 0.9, 0.9],      # L6 评审与发散: 中熵/核心资产/高危/高发散
+        7: [0.9, 0.9, 1.0, 1.0]       # L7 巅峰博弈: 极限熵/极致/命根子/极致风险
+    }
+    
+    # 路由权重向量 (用于加权欧几里得空间)
+    # 格式: [熵权重, 术语密度权重, 核心度权重, 风险权重]
+    ROUTE_WEIGHTS_VEC: list = [1.0, 1.0, 1.5, 2.0]
     
     # 路由级别名称映射
     ROUTE_LEVEL_NAMES: dict = {

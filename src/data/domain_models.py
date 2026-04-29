@@ -24,8 +24,22 @@ class TaskType(str, Enum):
     GENERAL = "general"     # 通用对话任务
 
 
+class RoutingLevel(int, Enum):
+    """路由级别枚举（架构师规范命名）
+
+    定义任务路由级别，涵盖物理、业务、认知多维特征。
+    级别越高，需要的算力越强大，处理流程越严格。
+    """
+    L1_LOCAL_FAST = 1          # 本地极速响应 (小模型/缓存/快速分诊)
+    L2_STANDARD_PROXY = 2      # 标准代理执行 (常规指令/日常翻译)
+    L3_THOUGHTFUL_REPLY = 3    # 思考型单发 (简单推理/会议摘要)
+    L4_COMPLEX_EXECUTION = 4   # 复杂链式执行 (多步骤/登录模块/重构小函数)
+    L5_LOGIC_DEEP_DIVE = 5     # 逻辑深钻 (Nature级翻译/深度审稿/复杂证明)
+    L6_CREATIVE_REVIEW = 6     # 创意与安全评审 (核心资产修改/发散思维/品牌起名)
+    L7_PEAK_GAME = 7           # 巅峰博弈 (极高风险/全量资源/极限场景)
+
 class RouteLevel(int, Enum):
-    """路由级别枚举
+    """路由级别枚举（保留向后兼容）
 
     定义任务复杂度等级，用于选择合适的推理策略和模型。
     级别越高，需要的算力和模型能力越强。
