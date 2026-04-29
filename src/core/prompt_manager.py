@@ -276,3 +276,150 @@ class PromptManager:
         
         truncated = prompt[:max_chars - 100]
         return truncated + "\n\n（提示词已截断...）"
+
+    # ==================== Reflexion 策略专用方法 ====================
+    
+    @staticmethod
+    def build_critique_prompt(original_messages: list, draft: str) -> list:
+        """构建评审提示词
+        
+        Args:
+            original_messages: 原始消息列表
+            draft: 待评审的草稿
+            
+        Returns:
+            list: 评审提示词消息列表
+        """
+        critique_instruction = """你是一位严苛的评审专家，请对以下回答进行全面审查：
+
+审查维度：
+1. 逻辑自洽性：论证是否连贯，有无逻辑漏洞
+2. 事实准确性：陈述的事实是否准确
+3. 完整性：是否遗漏重要信息
+4. 清晰度：表达是否清晰易懂
+
+请直接指出问题，无需修饰。如果回答完美，请用"满意"或"PASS"开头。"""
+
+        return original_messages + [
+            {"role": "assistant", "content": draft},
+            {"role": "system", "content": critique_instruction}
+        ]
+
+    @staticmethod
+    def build_refine_prompt(original_messages: list, draft: str, critique: str) -> list:
+        """构建修正提示词
+        
+        Args:
+            original_messages: 原始消息列表
+            draft: 原始草稿
+            critique: 评审意见
+            
+        Returns:
+            list: 修正提示词消息列表
+        """
+        refine_instruction = f"""请根据以下评审意见对回答进行全面修正：
+
+评审意见：
+{critique}
+
+原始回答：
+{draft}
+
+要求：
+1. 逐条回应评审意见
+2. 保持回答的完整性和连贯性
+3. 修正所有指出的问题"""
+
+        return original_messages + [
+            {"role": "assistant", "content": draft},
+            {"role": "user", "content": refine_instruction}
+        ]
+
+    # ==================== PlanAndSolve 策略专用方法 ====================
+    
+    # JSON 计划指令常量
+    PLAN_JSON_INSTRUCTION: str = """请将任务分解为 3-5 个逻辑步骤，以纯 JSON 数组格式输出，不要包含任何其他文字。
+
+示例格式：
+["步骤1描述", "步骤2描述", "步骤3描述"]"""
+
+    @staticmethod
+    def build_step_execution_prompt(messages: list, step: str, working_context: str) -> list:
+        """构建步骤执行提示词
+        
+        Args:
+            messages: 原始消息列表
+            step: 当前步骤描述
+            working_context: 已完成的工作上下文
+            
+        Returns:
+            list: 步骤执行提示词消息列表
+        """
+        step_instruction = f"""当前任务进度：
+
+已完成的工作：
+{working_context}
+
+现在请执行以下步骤：
+{step}
+
+要求：
+1. 专注于当前步骤
+2. 提供详细的执行过程
+3. 输出步骤结果"""
+
+        return messages + [{"role": "system", "content": step_instruction}]
+
+    @staticmethod
+    def build_final_summary_prompt(messages: list, working_context: str) -> list:
+        """构建最终汇总提示词
+        
+        Args:
+            messages: 原始消息列表
+            working_context: 完整的工作上下文
+            
+        Returns:
+            list: 最终汇总提示词消息列表
+        """
+        summary_instruction = f"""请基于以下执行过程给出最终答案：
+
+执行过程：
+{working_context}
+
+要求：
+1. 综合所有步骤的结果
+2. 提供清晰、完整的最终答案
+3. 如果有步骤失败，请说明影响"""
+
+        return messages + [{"role": "system", "content": summary_instruction}]
+
+    # ==================== SimpleFusion 策略专用方法 ====================
+    
+    @staticmethod
+    def build_fusion_prompt(candidates: list) -> list:
+        """构建融合提示词
+        
+        Args:
+            candidates: 候选答案列表
+            
+        Returns:
+            list: 融合提示词消息列表
+        """
+        candidates_str = "\n\n".join([
+            f"候选 {i+1}：\n{answer}" 
+            for i, answer in enumerate(candidates)
+        ])
+
+        fusion_instruction = f"""你是一个专业的 AI 融合专家，能够综合多个 AI 的回答，生成一个更全面、更准确的最终回答。
+
+以下是多个 AI 对同一个问题的回答：
+
+{candidates_str}
+
+请基于以上回答，生成一个综合的、高质量的最终回答。要求：
+1. 综合所有候选答案的优点
+2. 消除重复内容
+3. 保持逻辑连贯
+4. 如果候选答案之间有冲突，请指出并给出你的判断"""
+
+        return [{"role": "user", "content": fusion_instruction}]

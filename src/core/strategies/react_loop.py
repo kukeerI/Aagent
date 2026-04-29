@@ -10,12 +10,14 @@ import time
 from typing import List, Dict, Any, Optional
 
 from src.services.tracing import tracing
+from src.services.gateway import AsyncGateway
+from src.core.strategies.base import ReasoningStrategy
 from src.data.domain_models import AgentTask
 from src.config import config
 from src.utils.logger import logger
 
 
-class ReactLoopStrategy:
+class ReactLoopStrategy(ReasoningStrategy):
     """ReAct 循环策略
 
     通过思考-行动-观察循环逐步解决问题，适合需要多步推理的复杂任务。
@@ -29,6 +31,7 @@ class ReactLoopStrategy:
         """
         self.max_react_steps = 10
         self.window_size = 3  # 滑动窗口大小
+        self.gateway = AsyncGateway()
 
     async def execute(self, messages: List[Dict[str, str]], model_pool: List[Dict[str, Any]], trace_id: str) -> str:
         """执行 ReAct 循环推理
@@ -132,17 +135,7 @@ class ReactLoopStrategy:
                 return "", ""
 
             node = model_pool[0]
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(
-                base_url=node["base_url"],
-                api_key=node["api_key"]
-            )
-            response = await client.chat.completions.create(
-                model=node["model_name"],
-                messages=messages,
-                temperature=0.7
-            )
-            content = response.choices[0].message.content
+            content = await self.gateway.call(node, messages, trace_id)
 
             # 解析思考和行动
             thought = ""

@@ -12,6 +12,8 @@ import time
 from typing import List, Dict, Any, Tuple
 
 from src.services.tracing import tracing
+from src.services.gateway import AsyncGateway
+from src.core.strategies.base import ReasoningStrategy
 from src.data.schemas import JudgeResponse, EntityVerificationResponse
 from src.core.prompts import JudgePrompts
 from src.config import config
@@ -19,7 +21,7 @@ from src.utils.logger import logger
 from src.core.exceptions import StrategyFallbackError
 
 
-class FourStepJudgeStrategy:
+class FourStepJudgeStrategy(ReasoningStrategy):
     """四步裁判策略
 
     实现了四步评审工作流：
@@ -28,6 +30,9 @@ class FourStepJudgeStrategy:
     3. 实体核查：对所有草案进行实体提取和置信度评估
     4. 人工锚定拦截：检查高危漏洞和低置信度实体，决定是否需要人工干预
     """
+
+    def __init__(self):
+        self.gateway = AsyncGateway()
 
     async def execute(self, messages: List[Dict[str, str]], model_pool: List[Dict[str, Any]], trace_id: str) -> str:
         """执行四步裁判推理
@@ -114,20 +119,7 @@ class FourStepJudgeStrategy:
         Raises:
             Exception: 请求失败时抛出
         """
-        try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(
-                base_url=node["base_url"],
-                api_key=node["api_key"]
-            )
-            response = await client.chat.completions.create(
-                model=node["model_name"],
-                messages=messages,
-                temperature=0.7
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            raise e
+        return await self.gateway.call(node, messages, "four-step-judge-concurrent")
 
     async def _four_step_judge_workflow(self, drafts: List[str], nodes: List[Dict[str, Any]], trace_id: str) -> Tuple[str, bool]:
         """四步 AI 裁判工作流
@@ -195,21 +187,8 @@ class FourStepJudgeStrategy:
                 ]
 
                 try:
-                    import httpx
                     logger.info(f"[{trace_id}] [Step 2] 开始评审请求 (超时: {config.REQUEST_TIMEOUT}s)")
-                    from openai import AsyncOpenAI
-                    http_client = httpx.AsyncClient(timeout=config.REQUEST_TIMEOUT)
-                    client = AsyncOpenAI(
-                        base_url=high_power_node["base_url"],
-                        api_key=high_power_node["api_key"],
-                        http_client=http_client
-                    )
-                    judge_response = await client.chat.completions.create(
-                        model=high_power_node["model_name"],
-                        messages=judge_messages,
-                        temperature=0.7
-                    )
-                    judge_content = judge_response.choices[0].message.content
+                    judge_content = await self.gateway.call(high_power_node, judge_messages, f"{trace_id}-judge")
 
                     # 解析评审结果
                     judge_result = json.loads(judge_content)
@@ -249,21 +228,8 @@ class FourStepJudgeStrategy:
                 ]
 
                 try:
-                    import httpx
                     logger.info(f"[{trace_id}] [Step 3] 开始实体核查请求 (超时: {config.REQUEST_TIMEOUT}s)")
-                    from openai import AsyncOpenAI
-                    http_client = httpx.AsyncClient(timeout=config.REQUEST_TIMEOUT)
-                    client = AsyncOpenAI(
-                        base_url=high_power_node["base_url"],
-                        api_key=high_power_node["api_key"],
-                        http_client=http_client
-                    )
-                    entity_response = await client.chat.completions.create(
-                        model=high_power_node["model_name"],
-                        messages=entity_messages,
-                        temperature=0.7
-                    )
-                    entity_content = entity_response.choices[0].message.content
+                    entity_content = await self.gateway.call(high_power_node, entity_messages, f"{trace_id}-entity")
 
                     # 解析实体核查结果
                     entity_result = json.loads(entity_content)

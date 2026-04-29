@@ -48,6 +48,17 @@ class Config:
     ENSEMBLE_SIZE: int = int(os.getenv("ENSEMBLE_SIZE", "3"))
     # 嵌入模型配置
     EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+    
+    # Reflexion 策略配置
+    REFLEXION_MAX_ITERS: int = int(os.getenv("REFLEXION_MAX_ITERS", "3"))
+    
+    # Fusion 策略配置
+    MAX_FUSION_MODELS: int = int(os.getenv("MAX_FUSION_MODELS", "3"))
+    
+    # 本地冗余节点配置
+    LOCAL_MODEL_URL: str = os.getenv("LOCAL_MODEL_URL", "http://localhost:1234/v1")
+    LOCAL_API_KEY: str = os.getenv("LOCAL_API_KEY", "lm-studio")
+    LOCAL_MODEL_NAME: str = os.getenv("LOCAL_MODEL_NAME", "deepseek-chat")
 
     # 沙箱配置
     DOCKER_ENABLED: bool = os.getenv("DOCKER_ENABLED", "True").lower() == "true"
