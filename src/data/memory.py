@@ -17,6 +17,8 @@ import json
 
 from pydantic import BaseModel, Field
 
+import aiofiles
+
 from src.config import config
 from src.utils.parser import extract_json
 from src.utils.logger import logger
@@ -293,6 +295,70 @@ class Memory:
         except Exception as e:
             logger.error(f"[Memory] 知识抽取失败 (可能是模型输出非标准 JSON): {e}")
 
+    async def _llm_extract_knowledge(self, text: str, gateway: "AsyncGateway", task_level: str = "L4") -> None:
+        """LLM 辅助提取：当任务等级为 L4 以上时，由 AgentExecutor 驱动进行实体关系抽取
+
+        参考 src/data/schemas.py 中的 EntityCheck / EntityVerificationResponse 设计，
+        使用 Pydantic 模型严格校验 LLM 输出，确保语义提取的健壮性。
+
+        Args:
+            text: 待抽取文本
+            gateway: 异步网关实例
+            task_level: 任务等级标识，仅 L4 及以上触发
+        """
+        level_map = {"L1": 1, "L2": 2, "L3": 3, "L4": 4, "L5": 5}
+        current_level = level_map.get(task_level.upper(), 0)
+        if current_level < 4:
+            return
+
+        if not text or len(text.strip()) < 10:
+            return
+
+        prompt = f"""请从以下文本中提取核心实体和它们之间的关系。
+要求：
+1. 实体需包含名称和类型（如 Person, Technology, Organization, Location, Concept）
+2. 关系需描述实体间的具体语义关联
+3. 必须严格按照 JSON Schema 输出
+
+{{
+  "entities": [
+    {{"name": "实体名称", "entity_type": "实体类型"}}
+  ],
+  "relationships": [
+    {{"source": "源实体名称", "target": "目标实体名称", "relationship_type": "关系类型", "strength": 0.8}}
+  ]
+}}
+
+文本内容：
+{text}
+"""
+        try:
+            messages = [
+                {"role": "system", "content": "你是一个知识抽取专家，擅长从文本中提取实体和关系。请严格按照 JSON 格式输出。"},
+                {"role": "user", "content": prompt}
+            ]
+            raw_response = await gateway.chat_completion(
+                model=config.DEFAULT_EXECUTION_MODEL,
+                messages=messages,
+                domain_skill="Extraction"
+            )
+
+            clean_json = re.search(r"\{.*\}", raw_response, re.DOTALL)
+            if not clean_json:
+                logger.error(f"[Memory] _llm_extract_knowledge: 响应中未找到 JSON: {raw_response[:100]}")
+                return
+            result = KnowledgeExtractionResult.model_validate_json(clean_json.group(0))
+
+            for ent in result.entities:
+                self._upsert_entity(ent.name, ent.entity_type)
+
+            for rel in result.relationships:
+                self._upsert_relationship(rel.source, rel.target, rel.relationship_type, rel.strength)
+
+            logger.info(f"[Memory] _llm_extract_knowledge (等级 {task_level}) 成功: {len(result.entities)} 实体, {len(result.relationships)} 关系")
+        except Exception as e:
+            logger.error(f"[Memory] _llm_extract_knowledge 失败: {e}")
+
     def _upsert_entity(self, name: str, entity_type: str):
         """健壮的实体更新逻辑：增加词频和更新时间戳"""
         name = name.strip().lower()
@@ -309,12 +375,24 @@ class Memory:
             self.knowledge_graph.nodes[name]['last_seen'] = datetime.now()
 
     def _upsert_relationship(self, source: str, target: str, rel_type: str, strength: float):
-        """健壮的关系更新逻辑"""
+        """健壮的关系更新逻辑
+
+        新增循环引用检测：如果 target → source 路径已存在，跳过添加，
+        防止 A->B->A 导致的死循环检索。
+        """
         source, target = source.strip().lower(), target.strip().lower()
         if not self.knowledge_graph.has_node(source):
             self._upsert_entity(source, "Unknown")
         if not self.knowledge_graph.has_node(target):
             self._upsert_entity(target, "Unknown")
+
+        if self.knowledge_graph.has_node(source) and self.knowledge_graph.has_node(target):
+            try:
+                if nx.has_path(self.knowledge_graph, target, source):
+                    logger.warning(f"[Memory] 检测到循环引用: {source} -> {target} 将导致死循环，跳过")
+                    return
+            except nx.NetworkXError:
+                pass
 
         edge_key = (source, target, rel_type)
         if edge_key in self.relationships:
@@ -365,6 +443,59 @@ class Memory:
             context_lines.append(f"- [{u}] {rel} [{v}]")
 
         return "背景知识图谱片段：\n" + "\n".join(context_lines)
+
+    def get_context_for_task(self, query_entities: List[str], depth: int = 1, top_k: int = 5) -> str:
+        """检索加权：在遍历 ego_graph 时，结合 strength 和 last_seen 进行排序
+
+        优先返回"最强关联"且"最新"的 top_k 条背景知识，避免低质量或过时的关系
+        污染 Prompt，同时控制 Token 使用量。
+
+        Args:
+            query_entities: 查询实体列表
+            depth: 子图深度（1 = 一度关系，2 = 二度关系）
+            top_k: 返回的最优三元组数量
+
+        Returns:
+            str: 格式化的排序后子图上下文描述
+        """
+        subgraph_nodes: Set[str] = set()
+
+        for q_ent in query_entities:
+            q_ent = q_ent.lower()
+            if self.knowledge_graph.has_node(q_ent):
+                ego_g = nx.ego_graph(self.knowledge_graph, q_ent, radius=depth)
+                subgraph_nodes.update(ego_g.nodes)
+
+        if not subgraph_nodes:
+            return "未在图谱中找到相关背景知识。"
+
+        target_subgraph = self.knowledge_graph.subgraph(subgraph_nodes)
+        scored_edges = []
+        now = datetime.now()
+
+        for u, v, data in target_subgraph.edges(data=True):
+            strength = data.get('strength', 0.5)
+            last_seen = data.get('timestamp', data.get('last_seen', now))
+            if isinstance(last_seen, str):
+                try:
+                    last_seen = datetime.fromisoformat(last_seen)
+                except Exception:
+                    last_seen = now
+
+            recency = (now - last_seen).total_seconds()
+            recency_score = max(0.0, 1.0 - recency / 86400.0)
+            combined_score = strength * 0.7 + recency_score * 0.3
+            rel = data.get('relationship_type', 'related to')
+            scored_edges.append((combined_score, u, v, rel))
+
+        scored_edges.sort(key=lambda x: x[0], reverse=True)
+        top_edges = scored_edges[:top_k]
+
+        context_lines = []
+        for score, u, v, rel in top_edges:
+            context_lines.append(f"- [{u}] {rel} [{v}] (权重: {score:.2f})")
+
+        return "背景知识图谱片段（按关联强度排序）：\n" + "\n".join(context_lines)
 
     # ==================== 原有记忆管理方法 ====================
 
@@ -632,7 +763,7 @@ class Memory:
         }
 
     async def save_graph(self, filename: str = "knowledge_graph.json"):
-        """保存知识图谱"""
+        """保存知识图谱（异步 IO，使用 aiofiles 避免阻塞协程）"""
         graph_data = {
             "nodes": [],
             "edges": []
@@ -654,16 +785,17 @@ class Memory:
                 "data": edge_data
             })
 
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(graph_data, f, ensure_ascii=False, indent=2)
+        async with aiofiles.open(filename, 'w', encoding='utf-8') as f:
+            await f.write(json.dumps(graph_data, ensure_ascii=False, indent=2))
 
         logger.info(f"[Memory] 知识图谱已保存到 {filename}")
 
     async def load_graph(self, filename: str = "knowledge_graph.json"):
-        """加载知识图谱"""
+        """加载知识图谱（异步 IO，使用 aiofiles 避免阻塞协程）"""
         try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                graph_data = json.load(f)
+            async with aiofiles.open(filename, 'r', encoding='utf-8') as f:
+                content = await f.read()
+                graph_data = json.loads(content)
 
             self.knowledge_graph.clear()
             self.entities.clear()
