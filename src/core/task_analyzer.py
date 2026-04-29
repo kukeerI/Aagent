@@ -22,6 +22,7 @@ from src.services.gateway import AsyncGateway
 from src.services.tracing import tracing
 from src.config import config
 from src.utils.logger import logger
+from src.core.exceptions import TaskAnalysisError
 from src.data.domain_models import TaskPhysicalProfile
 
 
@@ -34,6 +35,12 @@ class TaskAnalyzer:
     - 分类任务类型
     - 支持 Fast Pass 极速分诊
     - 提取物理特征指纹（信息熵、术语密度、N-gram多样性）
+
+    性能特性：
+    - 模型使用类级别懒加载 + 双重检查锁定，避免重复加载
+    - 所有 Embedding 推理通过 asyncio.to_thread 异步化，不阻塞事件循环
+    - Fast Pass 机制对简短文本直接跳过 Embedding
+    - 提供 unload_model() 接口允许手动释放显存
     """
 
     # 类级别预编译正则表达式 - 避免每次实例化重复编译
@@ -49,52 +56,75 @@ class TaskAnalyzer:
         re.IGNORECASE
     )
 
+    # 类级别模型单例 + 并发锁
+    _model_instance = None
+    _model_lock = asyncio.Lock()
+
+    @classmethod
+    async def _get_model(cls) -> SentenceTransformer:
+        """异步单例懒加载模型，防止阻塞事件循环
+
+        使用类级别变量 + 双重检查锁定，确保：
+        - 一个进程内只有一个模型实例（节省显存）
+        - 通过 asyncio.to_thread 防止模型加载阻塞事件循环
+        - 并发安全
+
+        Returns:
+            SentenceTransformer: 加载好的嵌入模型
+
+        Raises:
+            TaskAnalysisError: 模型加载失败时抛出
+        """
+        if cls._model_instance is None:
+            async with cls._model_lock:
+                if cls._model_instance is None:
+                    logger.info("[TaskAnalyzer] 首次唤醒，正在异步加载 SentenceTransformer...")
+                    try:
+                        cls._model_instance = await asyncio.to_thread(
+                            SentenceTransformer,
+                            config.EMBEDDING_MODEL_NAME
+                        )
+                        logger.info("[TaskAnalyzer] 模型加载完成.")
+                    except Exception as e:
+                        logger.error(f"[TaskAnalyzer] 模型加载失败: {e}")
+                        raise TaskAnalysisError(f"Embedding 模型初始化失败: {e}")
+        return cls._model_instance
+
+    @classmethod
+    def unload_model(cls):
+        """释放模型内存，供系统内存紧张时调用"""
+        if cls._model_instance is not None:
+            del cls._model_instance
+            cls._model_instance = None
+            logger.info("[TaskAnalyzer] 嵌入模型已从内存中卸载.")
+
     def __init__(self, gateway: Optional[AsyncGateway] = None):
         """初始化任务分析器
+
+        注意：模型不在 __init__ 中加载，而是在首次需要时通过 _get_model() 懒加载。
 
         Args:
             gateway: 网关实例，用于依赖注入（可选）
         """
         self.gateway = gateway or AsyncGateway()
-        self.embedding_model = None
         self.use_local_embedding = False
         self.model_loaded = False
         # 预编译正则，提高性能
         self.fast_pass_regex = [re.compile(p) for p in config.FAST_PASS_PATTERNS]
-        # 防御并发加载 OOM 的单例锁
-        self._model_lock = asyncio.Lock()
 
     async def initialize(self):
         """异步初始化模型
 
         确保模型已加载，避免在处理任务时阻塞。
-        使用单例锁防止并发加载导致 OOM。
+        使用 _get_model() 的级联懒加载机制。
         """
         if not self.model_loaded:
-            await self._load_embedding_model()
-
-    async def _load_embedding_model(self):
-        """异步加载嵌入模型
-
-        - 使用单例锁防止并发加载导致 OOM
-        - 尝试加载本地模型（从配置读取模型名称）
-        - 加载失败时回退到远程 API 模式
-        - 使用线程池加载，避免阻塞事件循环
-        """
-        async with self._model_lock:
-            # 双重检查锁，防止多次加载
-            if self.model_loaded:
-                return
-
             try:
-                logger.info(f"[TaskAnalyzer] 开始加载本地嵌入模型: {config.EMBEDDING_MODEL_NAME}")
-                # 使用线程池加载模型，避免阻塞事件循环
-                self.embedding_model = await asyncio.to_thread(SentenceTransformer, config.EMBEDDING_MODEL_NAME)
+                await self._get_model()
                 self.use_local_embedding = True
                 self.model_loaded = True
-                logger.info("[TaskAnalyzer] 本地嵌入模型加载成功")
-            except Exception as e:
-                logger.error(f"[TaskAnalyzer] 本地嵌入模型加载失败: {e}")
+                logger.info("[TaskAnalyzer] 本地嵌入模型可用")
+            except TaskAnalysisError:
                 logger.info("[TaskAnalyzer] 将使用远程 API 进行嵌入计算")
                 self.use_local_embedding = False
                 self.model_loaded = True
@@ -208,10 +238,10 @@ class TaskAnalyzer:
         return min(max(diversity, 0.0), 1.0)
 
     async def extract_physical_profile(self, task: str) -> TaskPhysicalProfile:
-        """提取物理特征画像
+        """提取物理特征画像，带 Fast Pass 机制
 
         极速计算任务的物理特征，不调用任何 LLM 或 Embedding 模型。
-        对于简单任务（is_fast_pass），直接返回基础画像。
+        对于简短文本且不含领域关键词的任务，直接返回 Fast Pass 基础画像。
 
         Args:
             task: 任务描述文本
@@ -219,7 +249,19 @@ class TaskAnalyzer:
         Returns:
             TaskPhysicalProfile: 物理特征画像对象
         """
-        # 短路逻辑：简单任务直接返回基础画像
+        # 1. Fast Pass 机制：极速分诊（不启动 Embedding 模型）
+        cleaned = task.strip()
+        if len(cleaned) < 30 and not self.DOMAIN_REGEX.search(cleaned):
+            logger.info(f"[TaskAnalyzer] 触发 Fast Pass: '{cleaned[:20]}...'，跳过深度嵌入计算")
+            return TaskPhysicalProfile(
+                size=len(cleaned),
+                entropy=0.1,
+                term_density=0.0,
+                structural_variance=0.0,
+                is_fast_pass=True
+            )
+
+        # 2. 短路逻辑：通过 _check_fast_pass 的简单任务返回基础画像
         is_simple = await self._check_fast_pass(task)
         if is_simple:
             logger.info(f"[TaskAnalyzer] 任务 '{task[:30]}...' 符合快速通过条件，返回基础物理画像")
@@ -227,10 +269,11 @@ class TaskAnalyzer:
                 size=len(task),
                 entropy=0.0,
                 term_density=0.0,
-                structural_variance=0.0
+                structural_variance=0.0,
+                is_fast_pass=True
             )
 
-        # 极速计算物理指标（纯 CPU 计算，毫秒级完成）
+        # 3. 极速计算物理指标（纯 CPU 计算，毫秒级完成）
         entropy = self._calculate_entropy(task)
         term_density = self._calculate_term_density(task)
         
@@ -245,7 +288,8 @@ class TaskAnalyzer:
             size=len(task),
             entropy=entropy,
             term_density=term_density,
-            structural_variance=structural_variance
+            structural_variance=structural_variance,
+            is_fast_pass=False
         )
 
     def _calculate_ngram_volatility(self, drafts: List[str]) -> float:
@@ -415,8 +459,7 @@ class TaskAnalyzer:
             }
 
         # 2. 只有复杂任务才进入重装深度分析
-        async with self._model_lock:
-            await self.initialize()  # 确保模型加载
+        await self.initialize()  # 使用 _get_model() 的懒加载机制
 
         start_time = time.time()
         drafts = await self._generate_multiple_drafts(task)
@@ -570,14 +613,10 @@ class TaskAnalyzer:
             Exception: 计算过程中出现错误时抛出
         """
         with tracing.start_span("task_analyzer.calculate_embeddings"):
-            # 确保模型已加载（带锁保护）
-            async with self._model_lock:
-                if not self.model_loaded:
-                    await self.initialize()
-
-            if self.use_local_embedding and self.embedding_model:
-                # 使用本地模型计算嵌入
-                embeddings = await asyncio.to_thread(self.embedding_model.encode, texts)
+            if self.use_local_embedding:
+                # 使用 _get_model() 懒加载模型，encode 通过 to_thread 异步化
+                model = await self._get_model()
+                embeddings = await asyncio.to_thread(model.encode, texts)
             else:
                 # 使用远程 API 计算嵌入
                 embeddings = await self._get_embeddings_from_api(texts)

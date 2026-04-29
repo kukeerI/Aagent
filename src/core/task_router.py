@@ -39,7 +39,7 @@ class RouteDecision(BaseModel):
     reason: str
     latency_ms: float              # 路由决策耗时（毫秒）
     confidence: float              # 决策置信度（0.0-1.0）
-    distance_map: Optional[Dict[str, float]] = None  # 向量距离分布
+    distance_map: Optional[Dict[int, float]] = None  # 向量距离分布 (L1~L7 的加权距离)
     score_details: Optional[Dict[str, Any]] = None   # 原始特征得分
     initial_level: Optional[RoutingLevel] = None     # 初始匹配级别
 
@@ -200,7 +200,7 @@ class TaskRouter:
             initial_level=vector_result['level']
         )
 
-        self._log_decision(decision)
+        self._log_decision(decision, distances=vector_result.get('distance_map'))
         return decision
 
     def _match_vector(self, profile: TaskProfile) -> Dict[str, Any]:
@@ -235,7 +235,7 @@ class TaskRouter:
         return {
             "level": best_level,
             "confidence": confidence,
-            "distance_map": {str(k): float(v) for k, v in distance_map.items()},
+            "distance_map": {k: float(v) for k, v in distance_map.items()},
             "score_details": score_details
         }
 
@@ -295,21 +295,49 @@ class TaskRouter:
 
         return distance_map
 
-    def _log_decision(self, decision: RouteDecision):
-        """决策审计日志 - 维度 2：可解释性"""
+    def _log_decision(self, decision: RouteDecision, distances: Optional[Dict[int, float]] = None):
+        """决策审计日志 - 增强版可解释性输出
+
+        支持白盒化可审计：
+        - 格式化打印路由判决摘要
+        - 向量距离地图分级展示（仅 VectorMatch 模式）
+        - 结构化为 JSON 友好的多行格式，方便 ELK/Loki 收集
+
+        Args:
+            decision: 路由决策对象
+            distances: 原始距离映射字典（VectorMatch 模式传入）
+        """
         route_name = config.ROUTE_LEVEL_NAMES.get(decision.final_level.value, "Unknown")
-        
-        logger.info(
-            f"决策审计 | 最终等级: {decision.final_level.name} ({route_name}) | "
-            f"来源: {decision.source} | 耗时: {decision.latency_ms:.2f}ms | "
-            f"置信度: {decision.confidence:.4f}"
+
+        # 1. 基础摘要
+        log_header = (
+            f"[路由判决] 最终定级: {decision.final_level.name} ({route_name}) | "
+            f"规则来源: {decision.source} | "
+            f"耗时: {decision.latency_ms:.2f}ms"
         )
-        
-        if decision.reason:
-            logger.info(f"决策原因: {decision.reason}")
-            
-        if decision.source.startswith("Vector") and decision.distance_map:
-            logger.debug(f"距离分布: {decision.distance_map}")
-            
+        logger.info(log_header)
+        logger.info(f"   ↳ 决策依据: {decision.reason}")
+
+        # 2. 向量距离地图解析 (仅在非 Hard Gate 拦截时存在)
+        if distances:
+            sorted_dist = sorted(distances.items(), key=lambda item: item[1])
+
+            dist_report = "   ↳ 向量距离地图 (Distance Map):\n"
+            for rank, (level_num, dist) in enumerate(sorted_dist):
+                level_enum = RoutingLevel(level_num)
+                lvl_name = config.ROUTE_LEVEL_NAMES.get(level_num, "Unknown")
+
+                if rank == 0:
+                    prefix = "      🏆 [命中]"
+                elif rank == len(sorted_dist) - 1:
+                    prefix = "      └── [最远]"
+                else:
+                    prefix = "      ├── [备选]"
+
+                dist_report += f"{prefix} {level_enum.name} ({lvl_name}): {dist:.4f}\n"
+
+            logger.info(dist_report.strip())
+
+        # 3. 原始特征得分 (debug 级别)
         if decision.score_details:
-            logger.debug(f"特征详情: {decision.score_details}")
+            logger.debug(f"   ↳ 特征详情: {decision.score_details}")

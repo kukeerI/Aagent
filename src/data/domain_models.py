@@ -314,6 +314,10 @@ class TaskPhysicalProfile(BaseProfile):
         ge=0, le=1, 
         description="语义方差，反映表述的不确定性。0.0 表示表述清晰确定，1.0 表示高度模糊"
     )
+    is_fast_pass: bool = Field(
+        False,
+        description="是否通过极速分诊跳过深度嵌入计算"
+    )
 
 
 class TaskBusinessProfile(BaseProfile):
