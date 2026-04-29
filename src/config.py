@@ -212,6 +212,41 @@ class Config:
         7: "巅峰博弈"
     }
 
+    def get_route_prototypes(self) -> dict:
+        """
+        维度 4：从环境变量或动态源读取路由原型向量。
+        如果需要从 Redis 读取，只需在这里修改逻辑，Router 代码无需变动。
+        
+        Returns:
+            dict: 路由级别到原型向量的映射
+        """
+        # 默认原型向量
+        base_prototypes = {
+            1: [0.1, 0.1, 0.1, 0.0],      # L1 极速分诊
+            2: [0.3, 0.2, 0.2, 0.2],      # L2 标准代理
+            3: [0.5, 0.3, 0.3, 0.3],      # L3 思考回复
+            4: [0.6, 0.5, 0.5, 0.5],      # L4 复杂执行
+            5: [0.8, 0.9, 0.2, 0.4],      # L5 逻辑深钻
+            6: [0.5, 0.4, 0.9, 0.9],      # L6 评审与发散
+            7: [0.9, 0.9, 1.0, 1.0]       # L7 巅峰博弈
+        }
+
+        # 动态覆盖逻辑 (示例：从环境变量读取)
+        # 格式: L{级别}_{特征} = 值
+        # 特征: entropy, term_density, coreness, risk_score
+        for level in range(1, 8):
+            for idx, feature in enumerate(['entropy', 'term_density', 'coreness', 'risk_score']):
+                env_var = f"L{level}_{feature.upper()}"
+                env_value = os.getenv(env_var)
+                if env_value:
+                    try:
+                        base_prototypes[level][idx] = float(env_value)
+                        logger.info(f"[Config] 动态配置 {env_var} = {env_value}")
+                    except ValueError:
+                        logger.warning(f"[Config] 无效的环境变量值: {env_var} = {env_value}")
+
+        return base_prototypes
+
 
 # 创建全局配置实例，供整个应用使用
 config = Config()

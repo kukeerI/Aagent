@@ -339,6 +339,10 @@ class TaskBusinessProfile(BaseProfile):
         False, 
         description="是否具有极强的实时性要求"
     )
+    has_privacy_data: bool = Field(
+        False,
+        description="是否包含敏感隐私数据（手机号、API Key、身份证号等）"
+    )
 
 
 class TaskCognitiveProfile(BaseProfile):
@@ -379,5 +383,9 @@ class TaskProfile(BaseModel):
     # 辅助元数据
     trace_id: str
     timestamp: float
+    raw_query: Optional[str] = Field(
+        None,
+        description="原始查询字符串，用于 Gate 层的正则表达式匹配（如 SQL 注入检测）"
+    )
 
     model_config = ConfigDict(extra='forbid')
