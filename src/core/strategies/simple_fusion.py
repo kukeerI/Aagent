@@ -1,12 +1,14 @@
 # src/core/strategies/simple_fusion.py
 # SimpleFusion 策略 - 模型感知版本
 # 依赖：asyncio, typing, src.core.strategies.base, src.config, 
-#       src.core.prompt_manager, src.services.gateway, src.utils.logger
+#       src.core.prompt_manager, src.services.gateway, src.utils.logger, src.core.checkpoint
 # 注意事项：
 #   - 彻底移除硬编码，通过 config 动态适配
 #   - 支持本地/远程动态切换
 #   - 使用 PromptManager 注入融合元指令
 #   - 实现本地冗余节点机制
+#   - 支持状态持久化（checkpoint）
+#   - 使用 asyncio.gather 并发请求多个模型
 
 import asyncio
 from typing import List, Dict, Any
@@ -16,6 +18,7 @@ from src.config import config
 from src.core.prompt_manager import PromptManager
 from src.services.gateway import AsyncGateway
 from src.utils.logger import logger
+from src.core.checkpoint import CheckpointManager
 
 
 class SimpleFusionStrategy(ReasoningStrategy):
@@ -31,6 +34,7 @@ class SimpleFusionStrategy(ReasoningStrategy):
     def __init__(self):
         """初始化 SimpleFusion 策略"""
         self.gateway = AsyncGateway()
+        self.checkpoint_manager = CheckpointManager()
 
     async def execute(self, messages: List[Dict[str, str]], model_pool: List[Dict[str, Any]], trace_id: str) -> str:
         """执行简单融合推理
@@ -49,6 +53,12 @@ class SimpleFusionStrategy(ReasoningStrategy):
         if not messages:
             logger.warning(f"[{trace_id}] 融合失败：没有可用的消息")
             return "融合失败：没有可用的消息"
+        
+        # 保存开始检查点
+        await self._save_checkpoint(trace_id, "fusion_start", {
+            "model_pool_size": len(model_pool),
+            "max_fusion_models": config.MAX_FUSION_MODELS
+        })
 
         # 1. 并发获取多个模型的响应（高可用：即便远程失败，也有其他路）
         # 敏感细节：自动从 config 加载模型列表
@@ -57,6 +67,13 @@ class SimpleFusionStrategy(ReasoningStrategy):
         
         valid_answers = [r for r in results if isinstance(r, str)]
         logger.info(f"[{trace_id}] 获取到 {len(valid_answers)}/{len(tasks)} 个有效响应")
+        
+        # 保存中间结果检查点
+        await self._save_checkpoint(trace_id, "fusion_results", {
+            "valid_answers_count": len(valid_answers),
+            "total_tasks": len(tasks),
+            "answers": valid_answers[:3]  # 只保存前3个以节省空间
+        })
         
         if not valid_answers:
             logger.warning(f"[{trace_id}] 没有获取到候选答案")
@@ -71,6 +88,12 @@ class SimpleFusionStrategy(ReasoningStrategy):
         except Exception as e:
             logger.error(f"[{trace_id}] 远程聚合失败 ({e})，降级至本地模型处理")
             final_answer = await self._execute_local(fusion_prompt)
+
+        # 保存最终结果检查点
+        await self._save_checkpoint(trace_id, "fusion_completed", {
+            "final_answer": final_answer,
+            "valid_answers_count": len(valid_answers)
+        })
 
         logger.info(f"[{trace_id}] SimpleFusion 策略完成")
         return final_answer
@@ -101,3 +124,18 @@ class SimpleFusionStrategy(ReasoningStrategy):
         except Exception as e:
             logger.error(f"本地冗余节点调用失败: {e}")
             return "所有模型都不可用，请稍后重试。"
+
+    async def _save_checkpoint(self, trace_id: str, state_name: str, context: dict):
+        """保存检查点
+        
+        Args:
+            trace_id: 追踪 ID
+            state_name: 状态名称
+            context: 上下文数据
+        """
+        try:
+            context['trace_id'] = trace_id
+            await self.checkpoint_manager.create_checkpoint(state_name, context)
+            logger.debug(f"[{trace_id}] 检查点已保存: {state_name}")
+        except Exception as e:
+            logger.warning(f"[{trace_id}] 检查点保存失败: {e}")

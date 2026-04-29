@@ -1,11 +1,13 @@
 # src/core/strategies/plan_and_solve.py
 # PlanAndSolve 策略 - 计划与步进执行版本
 # 依赖：json, re, typing, src.core.strategies.base, src.services.gateway, src.utils.logger
+#       src.core.checkpoint
 # 注意事项：
 #   - 强制模型先输出 JSON 格式的计划表
 #   - 实现强大的 JSON 解析和修复逻辑（正则表达式提取）
 #   - 按步骤执行并处理每一步的异常
 #   - 实现上下文压缩防止膨胀
+#   - 支持状态持久化（checkpoint）
 
 import json
 import re
@@ -15,6 +17,7 @@ from src.core.strategies.base import ReasoningStrategy
 from src.core.prompt_manager import PromptManager
 from src.services.gateway import AsyncGateway
 from src.utils.logger import logger
+from src.core.checkpoint import CheckpointManager
 
 
 class PlanAndSolveStrategy(ReasoningStrategy):
@@ -30,6 +33,7 @@ class PlanAndSolveStrategy(ReasoningStrategy):
     def __init__(self):
         """初始化 PlanAndSolve 策略"""
         self.gateway = AsyncGateway()
+        self.checkpoint_manager = CheckpointManager()
 
     async def execute(self, messages: List[Dict[str, str]], model_pool: List[Dict[str, Any]], trace_id: str) -> str:
         """执行 PlanAndSolve 推理
@@ -54,17 +58,47 @@ class PlanAndSolveStrategy(ReasoningStrategy):
         steps = self._parse_steps_robustly(plan_raw)
         logger.info(f"[{trace_id}] 解析到 {len(steps)} 个步骤: {steps}")
         
+        # 保存计划检查点
+        await self._save_checkpoint(trace_id, "plan_extracted", {
+            "steps": steps,
+            "raw_plan": plan_raw
+        })
+        
         # 2. 步进执行：每一层 Observation 都会作为下一层的 Context
         working_context = ""
         for idx, step in enumerate(steps):
             logger.info(f"[{trace_id}] [Step {idx+1}/{len(steps)}] 执行计划步骤: {step}")
+            
+            # 保存步骤开始检查点
+            await self._save_checkpoint(trace_id, f"step_{idx+1}_start", {
+                "step_index": idx,
+                "step_description": step,
+                "current_context": working_context
+            })
+            
             step_prompt = PromptManager.build_step_execution_prompt(messages, step, working_context)
             step_result = await self.gateway.call(model, step_prompt, f"{trace_id}-step-{idx}")
             working_context += f"\n[Step {idx+1} Output]: {step_result}"
             
+            # 保存步骤完成检查点
+            await self._save_checkpoint(trace_id, f"step_{idx+1}_completed", {
+                "step_index": idx,
+                "step_description": step,
+                "step_result": step_result,
+                "accumulated_context": working_context
+            })
+            
         # 3. 终期汇总
         final_prompt = PromptManager.build_final_summary_prompt(messages, working_context)
         final_answer = await self.gateway.call(model, final_prompt, trace_id)
+        
+        # 保存最终结果检查点
+        await self._save_checkpoint(trace_id, "final_result", {
+            "steps": steps,
+            "working_context": working_context,
+            "final_answer": final_answer,
+            "total_steps": len(steps)
+        })
         
         logger.info(f"[{trace_id}] PlanAndSolve 策略完成")
         return final_answer
@@ -111,3 +145,18 @@ class PlanAndSolveStrategy(ReasoningStrategy):
         
         # 兜底：默认步骤
         return ["分析问题", "执行解决", "总结结果"]
+
+    async def _save_checkpoint(self, trace_id: str, state_name: str, context: dict):
+        """保存检查点
+        
+        Args:
+            trace_id: 追踪 ID
+            state_name: 状态名称
+            context: 上下文数据
+        """
+        try:
+            context['trace_id'] = trace_id
+            await self.checkpoint_manager.create_checkpoint(state_name, context)
+            logger.debug(f"[{trace_id}] 检查点已保存: {state_name}")
+        except Exception as e:
+            logger.warning(f"[{trace_id}] 检查点保存失败: {e}")

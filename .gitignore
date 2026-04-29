@@ -2,7 +2,9 @@
 .env
 .env.local
 .env.*.local
-
+__pycache__
+.pyc
+.db
 # 密钥和证书
 *.key
 *.pem

@@ -15,6 +15,7 @@ Aagent是一个面向企业级生产环境的LLM原生高并发网关与多智�
 2. **Checkpointer和Time Travel**：支持任务中断、恢复和人工干预，实现状态的持久化和时光倒流。
 3. **GraphRAG记忆系统**：从向量存储升级到基于实体和关系的知识图谱，实现更智能的记忆检索。
 4. **LLMOps增强**：支持Prompt的A/B测试、版本管理，以及与Langfuse的集成，实现可视化的Prompt调优。
+5. **强控制流策略引擎**：实现Reflexion、PlanAndSolve、SimpleFusion三大策略，支持真正的思考-评审-修正闭环。
 
 ## 目录结构
 
@@ -26,7 +27,15 @@ Aagent/
 │   │   ├── checkpoint.py # 检查点管理
 │   │   ├── executor.py   # 执行器
 │   │   ├── orchestrator.py # 编排器
-│   │   └── state.py      # 状态机
+│   │   ├── state.py      # 状态机
+│   │   ├── prompt_manager.py # 提示词管理器
+│   │   └── strategies/   # 推理策略
+│   │       ├── base.py           # 策略基类
+│   │       ├── reflexion.py      # Reflexion策略
+│   │       ├── plan_and_solve.py # PlanAndSolve策略
+│   │       ├── simple_fusion.py  # SimpleFusion策略
+│   │       ├── react_loop.py     # ReAct循环策略
+│   │       └── four_step_judge.py # 四步裁判策略
 │   ├── data/            # 数据与记忆底座
 │   │   ├── database.py   # 数据库
 │   │   └── memory.py     # 记忆系统（GraphRAG）
@@ -41,6 +50,7 @@ Aagent/
 │   │   └── tracing.py    # 全链路追踪
 │   ├── config.py         # 配置管理
 │   └── utils/            # 工具函数
+├── test_strategy_system.py # 策略系统测试
 ├── test_features.py      # 功能测试
 ├── docker-compose.yml    # Docker编排
 ├── prometheus.yml        # Prometheus配置
@@ -78,6 +88,19 @@ DATABASE_URL=sqlite+aiosqlite:///./agent_data.db
 
 # 模型配置
 LM_STUDIO_URL=http://localhost:1234/v1
+DEFAULT_EXECUTION_MODEL=google/gemma-3-12b-it
+DEFAULT_RESEARCH_MODEL=google/gemma-3-12b-it
+DEFAULT_CREATIVE_MODEL=google/gemma-3-12b-it
+
+# 策略配置
+REFLEXION_MAX_ITERS=3
+MAX_FUSION_MODELS=3
+ENSEMBLE_SIZE=3
+
+# 本地冗余节点配置
+LOCAL_MODEL_URL=http://localhost:1234/v1
+LOCAL_API_KEY=lm-studio
+LOCAL_MODEL_NAME=deepseek-chat
 
 # 沙箱配置
 DOCKER_ENABLED=True
@@ -145,6 +168,40 @@ if __name__ == "__main__":
 
 ## 核心功能
 
+### 强控制流策略引擎
+
+Aagent实现了三大核心策略，支持真正的思考闭环：
+
+#### 1. Reflexion策略（逻辑深钻）
+实现Generate→Critique→Refine三阶段闭环，支持独立模型评审避免自我路径依赖。
+
+```python
+from src.core.strategies.reflexion import ReflexionStrategy
+
+strategy = ReflexionStrategy()
+result = await strategy.execute(messages, model_pool, trace_id)
+```
+
+#### 2. PlanAndSolve策略（巅峰博弈）
+将复杂任务拆解为可控步骤，步进执行并汇总结果。
+
+```python
+from src.core.strategies.plan_and_solve import PlanAndSolveStrategy
+
+strategy = PlanAndSolveStrategy()
+result = await strategy.execute(messages, model_pool, trace_id)
+```
+
+#### 3. SimpleFusion策略（多模型聚合）
+并发获取多个模型响应，实现高可用的答案融合。
+
+```python
+from src.core.strategies.simple_fusion import SimpleFusionStrategy
+
+strategy = SimpleFusionStrategy()
+result = await strategy.execute(messages, model_pool, trace_id)
+```
+
 ### MCP协议支持
 
 Aagent支持标准的Model Context Protocol，可直接接入外部MCP服务器，使用全球开发者提供的工具。
@@ -178,6 +235,20 @@ Aagent提供了完善的LLMOps功能：
 - 版本管理：追踪Prompt的版本变化
 - Langfuse集成：实现可视化的Prompt调优
 
+## 路由策略
+
+Aagent实现了L1-L7七级路由策略，根据任务复杂度自动选择合适的推理路径：
+
+| 级别 | 策略 | 适用场景 |
+|------|------|----------|
+| L1 | 极速分诊 | 简单问答、快速响应 |
+| L2 | 标准代理 | 常规任务、日常对话 |
+| L3 | 思考回复 | 需要一定推理的问题 |
+| L4 | 复杂执行 | 工具调用、多步骤任务 |
+| L5 | 逻辑深钻 | Reflexion策略，深度推理 |
+| L6 | 创意评审 | 四步裁判，多模型博弈 |
+| L7 | 巅峰博弈 | PlanAndSolve，复杂规划任务 |
+
 ## 监控与可观测性
 
 ### 全链路追踪
@@ -197,11 +268,24 @@ Aagent提供了丰富的监控指标：
 
 ## 开发指南
 
-### 扩展MCP工具
+### 扩展策略
 
-1. 创建MCP服务器，实现工具接口
-2. 在Aagent中配置MCP服务器URL
-3. Aagent会自动发现并使用这些工具
+1. 继承 `ReasoningStrategy` 基类
+2. 实现 `execute()` 方法
+3. 使用 `AsyncGateway` 调用模型
+4. 从 `PromptManager` 获取提示词
+
+```python
+from src.core.strategies.base import ReasoningStrategy
+
+class CustomStrategy(ReasoningStrategy):
+    def __init__(self):
+        self.gateway = AsyncGateway()
+    
+    async def execute(self, messages, model_pool, trace_id):
+        # 实现自定义逻辑
+        pass
+```
 
 ### 自定义Prompt
 
@@ -218,6 +302,16 @@ variants = [
 test_inputs = ["编写一个排序函数", "如何实现装饰器"]
 results = await gateway.a_b_test_prompts("code", variants, test_inputs)
 print(results)
+```
+
+### 运行测试
+
+```bash
+# 运行策略系统测试
+python test_strategy_system.py
+
+# 运行功能测试
+python test_features.py
 ```
 
 ### 贡献代码
