@@ -25,3 +25,12 @@ task.txt
 # 日志
 *.log
 npm-debug.log*
+
+# 测试文件夹
+test_old/
+
+# 检查点文件
+checkpoints/
+
+# 记忆数据库
+memory_db/
