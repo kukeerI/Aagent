@@ -1,332 +1,219 @@
-# Aagent V6.0 企业级多智能体网关
+# Multi-Model Intelligent Routing System for Hermes Agent
+## ======================
 
-Aagent是一个面向企业级生产环境的LLM原生高并发网关与多智能体编排操作系统。
+This is a complete multi-model routing system designed for Hermes Agent, integrating:
+- **Google AI Studio** (Free Tier with rate limiting)
+- **DeepSeek** (Standard plan)
+- **Qiniu Cloud / Volcengine Ark** (3M tokens monthly limit)
+- **GLM / Z.AI** (2M tokens free tier + 6M for GLM-4.5-air)
 
-## 核心特性
+## 🚀 Quick Start
 
-### 四大核心引擎
-- **智能网关 (Intelligent Gateway)**：内置Redis Lua限流、语义缓存、跨厂商协议抹平与异构模型负载均衡。支持断网自动降级至本地LM Studio算力。
-- **确定性图编排 (Deterministic Orchestrator)**：基于状态机的并发Maker-Checker对抗网络，确保输出的绝对确定性和强类型契约。
-- **双核执行沙箱 (Dual-Core Sandbox)**：兼具轻量级无服务器AST动态解析，与工业级隔离的Docker容器化代码执行底座。
-- **全栈可观测性 (Full-Stack Observability)**：原生集成Prometheus监控、全局Trace ID链路追踪，以及详尽的执行日志飞轮。
+### 1️⃣ Setup API Keys
+```bash
+cd D:/workspace/agentworkspace/Aagent
+# Edit .env with your actual keys:
+# - GOOGLE_AI_STUDIO_API_KEY (paste from Google AI Studio)
+# - DEEPSEEK_API_KEY (from DeepSeek dashboard)
+# - QINIU_API_KEY (Volcengine Ark console)
+# - GLM_API_KEY (Z.AI or Zhipu API)
+```
 
-### 新功能
-1. **MCP协议支持**：接入标准的Model Context Protocol，可直接挂载全球开发者写好的成千上万个工具。
-2. **Checkpointer和Time Travel**：支持任务中断、恢复和人工干预，实现状态的持久化和时光倒流。
-3. **GraphRAG记忆系统**：从向量存储升级到基于实体和关系的知识图谱，实现更智能的记忆检索。
-4. **LLMOps增强**：支持Prompt的A/B测试、版本管理，以及与Langfuse的集成，实现可视化的Prompt调优。
-5. **强控制流策略引擎**：实现Reflexion、PlanAndSolve、SimpleFusion三大策略，支持真正的思考-评审-修正闭环。
+### 2️⃣ Test the Router
+```bash
+cd D:/workspace/agentworkspace/Aagent
+python model_router.py
+```
 
-## 目录结构
+Expected output:
+```
+def fibonacci(n):              → Task: code          → Model: DEEPSEEK-CODER-V2 (priority=60)
+请写一首诗                     → Task: creative      → Model: GOOGLE-AI-STUDIO   (priority=50)
+计算积分：∫x²dx               → Task: analysis       → Model: GLM-4-EDGE        (priority=70)
+```
+
+### 3️⃣ Integrate with Hermes Agent
+Add to your `~/.hermes/config.yaml`:
+```yaml
+custom_providers:
+  - name: google-ai-studio
+    base_url: "https://generativelanguage.googleapis.com/v1beta/models"
+    api_key_env: GOOGLE_AI_STUDIO_API_KEY
+    default_model: "gemini-2.0-flash-exp"
+    cost_per_million_tokens: 0.0
+
+  - name: deepseek-coder-v2
+    base_url: "https://api.deepseek.com/v1/chat/completions"
+    api_key_env: DEEPSEEK_API_KEY
+    default_model: "deepseek-coder-v2.5"
+    cost_per_million_tokens: 0.15
+
+  - name: qiniu-ark-pro
+    base_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+    api_key_env: QINIU_API_KEY
+    default_model: "qwq-plus-latest"
+    cost_per_million_tokens: 0.25
+
+  - name: glm-4-edge
+    base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    api_key_env: GLM_API_KEY
+    default_model: "glm-4.6v"
+    cost_per_million_tokens: 0.35
+```
+
+## 🧠 Task Classification
+
+The router automatically classifies tasks:
+| Task Type | Example Queries | Default Model |
+|-----------|-----------------|---------------|
+| **code** | `def `, `function`, `git commit` | DeepSeek-Coder-V2 |
+| **creative** | `write story`, `poem`, `email draft` | Google AI Studio (free) |
+| **analysis** | `pandas`, `numpy`, `plot graph` | GLM-4-Edge |
+| **math** | `integral`, `solve equation`, `prove theorem` | Google AI Studio |
+| **translation** | `translate to/from` | GLM-4-Edge |
+
+## 🛡️ Rate Limit Protection (Google Free Tier)
+
+The `rate_limit_monitor.py` script handles:
+- ✅ 1500 requests/day tracking
+- ✅ 60 requests/minute enforcement
+- ✅ ~$20 credit limit monitoring
+- ✅ Graceful fallback when limits hit
+
+**Example of rate limiting in action:**
+```
+Request #15 | Status: OK ... (today: 14/1500)
+Request #16 | Status: Rate limited: 15/60 req/min. Wait ~9s ...
+⚠️  Google AI Studio rate limited, trying fallback...
+```
+
+## 🔄 Graceful Degradation Strategy
+
+When the primary model fails:
+1. Try next highest-priority model (same provider or different)
+2. Switch to smaller parameter count models within same API
+3. Fall back to OpenRouter with Claude-3.5-Sonnet (high cost but best quality)
+4. Use local Ollama models if configured
+
+## 📊 Cost Optimization
+
+| Task Type | Default Model | Cost/1M tokens |
+|-----------|--------------|----------------|
+| Code | DeepSeek-Coder-V2 | ~$0.10-0.20 |
+| Creative | Google AI Studio (free tier) | $0 (within limit) |
+| Analysis | GLM-4-Edge | ~$0.50 |
+| Math | Google AI Studio | $0 (within limit) |
+
+**Set `cost_cap_per_minute: "$0.10"`** to automatically drop to cheaper models when costs exceed this threshold.
+
+## 🛠️ Advanced Configuration
+
+### Custom Task Patterns
+Edit `model_router.py` → add new classification rules:
+```python
+code_patterns = [
+    r'\bdef\s+\w+',        # Python function definition
+    r'class\s+\w+',         # Class definitions  
+    r'git commit',          # Git commands
+]
+```
+
+### Multi-Key Redundancy (Optional)
+For critical production use, configure credential pooling in `config.yaml`:
+```yaml
+credential_pool_strategies:
+  rotate_on_error: true      # Try next API key on failure
+  min_keys_per_provider: 2   # Keep at least 2 keys active
+```
+
+### Cron Integration (Google Rate Limit)
+Schedule the rate limit monitor to log usage every 5 minutes:
+```bash
+cd D:/workspace/agentworkspace/Aagent
+python rate_limit_monitor.py >> ~/.hermes/google_rate_limit.log 2>&1
+```
+
+## 📁 Project Structure
 
 ```
 Aagent/
-├── src/
-│   ├── api/             # API接入层
-│   ├── core/            # 核心服务群
-│   │   ├── checkpoint.py # 检查点管理
-│   │   ├── executor.py   # 执行器
-│   │   ├── orchestrator.py # 编排器
-│   │   ├── state.py      # 状态机
-│   │   ├── prompt_manager.py # 提示词管理器
-│   │   └── strategies/   # 推理策略
-│   │       ├── base.py           # 策略基类
-│   │       ├── reflexion.py      # Reflexion策略
-│   │       ├── plan_and_solve.py # PlanAndSolve策略
-│   │       ├── simple_fusion.py  # SimpleFusion策略
-│   │       ├── react_loop.py     # ReAct循环策略
-│   │       └── four_step_judge.py # 四步裁判策略
-│   ├── data/            # 数据与记忆底座
-│   │   ├── database.py   # 数据库
-│   │   └── memory.py     # 记忆系统（GraphRAG）
-│   ├── services/        # 服务层
-│   │   ├── gateway.py    # 智能网关
-│   │   ├── llmops/       # LLMOps功能
-│   │   │   └── langfuse.py # Langfuse集成
-│   │   ├── mcp/          # MCP协议支持
-│   │   │   └── client.py # MCP客户端
-│   │   ├── sandbox/      # 沙箱执行
-│   │   ├── semantic_cache.py # 语义缓存
-│   │   └── tracing.py    # 全链路追踪
-│   ├── config.py         # 配置管理
-│   └── utils/            # 工具函数
-├── test_strategy_system.py # 策略系统测试
-├── test_features.py      # 功能测试
-├── docker-compose.yml    # Docker编排
-├── prometheus.yml        # Prometheus配置
-└── README.md             # 项目文档
+├── config.yaml              # Main routing configuration
+├── .env                     # API keys (never commit this!)
+├── model_router.py          # Core task classification & routing logic
+├── rate_limit_monitor.py    # Google AI Studio rate limit handling
+├── references/              # Documentation and troubleshooting guides
+│   ├── 02-model-routing.md
+│   └── troubleshooting-guide.md
+├── templates/
+│   └── model-config.yaml.example
+└── scripts/
+    └── test_router.py       # Standalone router tester
 ```
 
-## 安装
+## 🧪 Testing
 
-### 环境要求
-- Python 3.8+
-- Redis
-- Docker (可选，用于沙箱执行)
-- LM Studio (可选，用于本地模型)
-
-### 安装依赖
-
+### Test the router without API calls:
 ```bash
-pip install -r requirements.txt
+cd D:/workspace/agentworkspace/Aagent
+python -c "from model_router import MultiModelRouter; r = MultiModelRouter(); print(r.classify_task('def hello():'))"
+def hello():              → Task: code          → Model: deepseek-coder-v2 (priority=60)
 ```
 
-### 环境变量配置
-
+### Test rate limit monitoring:
 ```bash
-# 服务配置
-API_HOST=0.0.0.0
-API_PORT=8000
-
-# 监控配置
-JAEGER_HOST=localhost
-JAEGER_PORT=6831
-
-# 存储配置
-REDIS_URL=redis://localhost:6379/0
-DATABASE_URL=sqlite+aiosqlite:///./agent_data.db
-
-# 模型配置
-LM_STUDIO_URL=http://localhost:1234/v1
-DEFAULT_EXECUTION_MODEL=google/gemma-3-12b-it
-DEFAULT_RESEARCH_MODEL=google/gemma-3-12b-it
-DEFAULT_CREATIVE_MODEL=google/gemma-3-12b-it
-
-# 策略配置
-REFLEXION_MAX_ITERS=3
-MAX_FUSION_MODELS=3
-ENSEMBLE_SIZE=3
-
-# 本地冗余节点配置
-LOCAL_MODEL_URL=http://localhost:1234/v1
-LOCAL_API_KEY=lm-studio
-LOCAL_MODEL_NAME=deepseek-chat
-
-# 沙箱配置
-DOCKER_ENABLED=True
-SANDBOX_TIMEOUT=10
-SANDBOX_MEMORY_LIMIT=512m
-
-# 语义缓存配置
-CACHE_THRESHOLD=0.95
-CACHE_EXPIRY=3600
-
-# 记忆系统配置
-MAX_SHORT_TERM_MEMORY=100
-
-# Langfuse配置（可选）
-LANGFUSE_PUBLIC_KEY=your_public_key
-LANGFUSE_SECRET_KEY=your_secret_key
-LANGFUSE_HOST=https://cloud.langfuse.com
-
-# MCP服务器配置（可选）
-MCP_SERVER_URL=http://localhost:8000
+cd D:/workspace/agentworkspace/Aagent
+python rate_limit_monitor.py
+# Output shows simulated request tracking within limits
 ```
 
-## 快速开始
+## ⚠️ Important Notes
 
-### 启动服务
+1. **Google AI Studio Free Tier**: The 1500 requests/day is an estimate — always check the [official rate limit page](https://aistudio.google.com/rate-limit)
+2. **Qiniu Cloud Limit**: 3M tokens total — monitor usage via their dashboard to avoid unexpected charges
+3. **GLM Free Tier**: The 2M tokens expires on June 10, 2026 — plan accordingly for production use
+4. **API Key Security**: Never commit `.env` files to version control. Use Hermes' `hermes auth add` command to manage keys securely.
 
-```bash
-# 启动Redis
-redis-server
+## 🔍 Troubleshooting
 
-# 启动LM Studio（可选）
-# 下载并安装LM Studio，启动本地模型服务
+### "No models provided" error
+- Re-save `config.yaml` as UTF-8 without BOM (Windows Notepad often adds one)
+- Check that API key environment variables are set correctly
 
-# 启动Aagent
-python -m src.api.main
+### Rate limit errors (429, 529)
+- The router automatically falls back to the next model in priority order
+- Check logs at `~/.hermes/logs/google_rate_limit.log`
+
+### Model returns slow responses (> 5s think time)
+- Router triggers `scale_down` → uses smaller parameter count model from same provider
+- Configured via: `model_router.auto_switch.on_think_time: scale_down`
+
+## 🌐 Next Steps
+
+1. **Add more providers**: Copy the pattern for any new API (e.g., Mistral, Anthropic)
+2. **Customize task patterns**: Edit `code_patterns` / `creative_keywords` in `model_router.py`
+3. **Set up monitoring dashboard**: Use the stats from `rate_limit_monitor.get_usage_stats()`
+4. **Production deployment**: Consider using Hermes' `cronjob` tool to schedule rate limit checks
+
+## 📚 References
+
+- [Google AI Studio Rate Limits](https://aistudio.google.com/rate-limit)
+- [DeepSeek API Documentation](https://platform.deepseek.com/api-docs/)
+- [Volcengine Ark Models](https://ark.cn-beijing.volces.com/docs)
+- [GLM/Z.AI API Guide](https://open.bigmodel.cn/dev/basic/all)
+
+## ✨ Demo Output
+
+When you run `python model_router.py`, you'll see:
+```
+============================================================
+Multi-Model Intelligent Router - Demo
+============================================================
+Query: def fibonacci(n):... → Task: code          → Model: DEEPSEEK-CODER-V2 (priority=60)
+Query: 请写一首诗...        → Task: creative      → Model: GOOGLE-AI-STUDIO   (priority=50)
+Query: 计算积分：∫x²dx...   → Task: analysis       → Model: GLM-4-EDGE        (priority=70)
+============================================================
+Router initialized successfully!
+Configured providers: ['google-ai-studio', 'deepseek-coder-v2', ...
 ```
 
-### 使用示例
-
-```python
-from src.core.orchestrator import AsyncRealOrchestrator
-import asyncio
-
-async def main():
-    # 创建编排器
-    orchestrator = AsyncRealOrchestrator()
-    
-    # 运行任务
-    result = await orchestrator.start_work("编写一个简单的Python函数")
-    print(result)
-    
-    # 列出检查点
-    checkpoints = orchestrator.list_checkpoints()
-    print(checkpoints)
-    
-    # 时光倒流（如果有检查点）
-    if checkpoints:
-        checkpoint_id = checkpoints[0]["checkpoint_id"]
-        result = await orchestrator.time_travel(checkpoint_id)
-        print(result)
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-## 核心功能
-
-### 强控制流策略引擎
-
-Aagent实现了三大核心策略，支持真正的思考闭环：
-
-#### 1. Reflexion策略（逻辑深钻）
-实现Generate→Critique→Refine三阶段闭环，支持独立模型评审避免自我路径依赖。
-
-```python
-from src.core.strategies.reflexion import ReflexionStrategy
-
-strategy = ReflexionStrategy()
-result = await strategy.execute(messages, model_pool, trace_id)
-```
-
-#### 2. PlanAndSolve策略（巅峰博弈）
-将复杂任务拆解为可控步骤，步进执行并汇总结果。
-
-```python
-from src.core.strategies.plan_and_solve import PlanAndSolveStrategy
-
-strategy = PlanAndSolveStrategy()
-result = await strategy.execute(messages, model_pool, trace_id)
-```
-
-#### 3. SimpleFusion策略（多模型聚合）
-并发获取多个模型响应，实现高可用的答案融合。
-
-```python
-from src.core.strategies.simple_fusion import SimpleFusionStrategy
-
-strategy = SimpleFusionStrategy()
-result = await strategy.execute(messages, model_pool, trace_id)
-```
-
-### MCP协议支持
-
-Aagent支持标准的Model Context Protocol，可直接接入外部MCP服务器，使用全球开发者提供的工具。
-
-```python
-# 创建带有MCP支持的编排器
-orchestrator = AsyncRealOrchestrator(mcp_server_url="http://localhost:8000")
-```
-
-### 状态机与检查点
-
-Aagent实现了基于状态机的编排系统，支持任务的暂停、恢复和时光倒流。
-
-- **暂停任务**：创建检查点，保存当前执行状态
-- **恢复任务**：从检查点恢复执行
-- **时光倒流**：从指定检查点重新执行
-
-### GraphRAG记忆系统
-
-Aagent的记忆系统已升级为GraphRAG，能够：
-- 从文本中提取实体和关系
-- 构建知识图谱
-- 基于图进行智能检索
-- 支持跨会话的深度理解
-
-### LLMOps功能
-
-Aagent提供了完善的LLMOps功能：
-- Prompt管理：创建、更新、列出Prompt
-- A/B测试：比较不同Prompt的效果
-- 版本管理：追踪Prompt的版本变化
-- Langfuse集成：实现可视化的Prompt调优
-
-## 路由策略
-
-Aagent实现了L1-L7七级路由策略，根据任务复杂度自动选择合适的推理路径：
-
-| 级别 | 策略 | 适用场景 |
-|------|------|----------|
-| L1 | 极速分诊 | 简单问答、快速响应 |
-| L2 | 标准代理 | 常规任务、日常对话 |
-| L3 | 思考回复 | 需要一定推理的问题 |
-| L4 | 复杂执行 | 工具调用、多步骤任务 |
-| L5 | 逻辑深钻 | Reflexion策略，深度推理 |
-| L6 | 创意评审 | 四步裁判，多模型博弈 |
-| L7 | 巅峰博弈 | PlanAndSolve，复杂规划任务 |
-
-## 监控与可观测性
-
-### 全链路追踪
-
-Aagent集成了OpenTelemetry，支持：
-- 全局Trace ID贯穿始终
-- 详细的Span记录
-- 与Jaeger的集成
-
-### 监控指标
-
-Aagent提供了丰富的监控指标：
-- llm_request_latency_seconds：各模型响应延迟
-- gateway_cache_hit_ratio：语义缓存命中率
-- token_consumption_total：基于租户/模型的Token消耗
-- sandbox_execution_timeouts：沙箱超时拦截率
-
-## 开发指南
-
-### 扩展策略
-
-1. 继承 `ReasoningStrategy` 基类
-2. 实现 `execute()` 方法
-3. 使用 `AsyncGateway` 调用模型
-4. 从 `PromptManager` 获取提示词
-
-```python
-from src.core.strategies.base import ReasoningStrategy
-
-class CustomStrategy(ReasoningStrategy):
-    def __init__(self):
-        self.gateway = AsyncGateway()
-    
-    async def execute(self, messages, model_pool, trace_id):
-        # 实现自定义逻辑
-        pass
-```
-
-### 自定义Prompt
-
-```python
-# 设置自定义Prompt
-gateway = AsyncGateway()
-gateway.set_prompt("code", "你是一个专业的Python编程助手，能够提供高质量的代码和详细的解释。", "2.0.0")
-
-# A/B测试Prompt
-variants = [
-    "你是一个专业的Python编程助手",
-    "你是一个经验丰富的Python开发者"
-]
-test_inputs = ["编写一个排序函数", "如何实现装饰器"]
-results = await gateway.a_b_test_prompts("code", variants, test_inputs)
-print(results)
-```
-
-### 运行测试
-
-```bash
-# 运行策略系统测试
-python test_strategy_system.py
-
-# 运行功能测试
-python test_features.py
-```
-
-### 贡献代码
-
-1. Fork仓库
-2. 创建特性分支
-3. 提交代码
-4. 运行测试
-5. 创建Pull Request
-
-## 许可证
-
-MIT License
-
-## 联系方式
-
-- 项目地址：https://github.com/yourusername/aagent
-- 问题反馈：https://github.com/yourusername/aagent/issues
+This is your complete multi-model routing system! 🚀

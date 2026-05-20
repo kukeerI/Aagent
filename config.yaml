@@ -1,0 +1,113 @@
+# Hermes Agent Multi-Model Routing Configuration
+# ======================
+model:
+  default: "google-ai-studio-free"
+  provider: "custom-google-ai"
+  base_url: "https://generativelanguage.googleapis.com/v1beta/models"
+  api_key: AIzaSyDUpFEfCiydjsTGWyo1ZudOh_5FBP4YJRs
+  context_length: 32000
+  
+# Custom Providers for Multi-Model Routing
+providers:
+  - name: "google-ai-studio"
+    base_url: "https://generativelanguage.googleapis.com/v1beta/models"
+    api_key_env: GOOGLE_AI_STUDIO_API_KEY
+    default_model: "gemini-2.0-flash-exp"  # Free tier optimized model
+    cost_per_million_tokens: 0.0          # FREE (within rate limit)
+    max_requests_per_minute: 60           # Google's free tier rate limit
+    auto_fallback: true
+    fallback_on:
+      - "429"  # Too many requests
+      - "529"  # Overload
+      - "timeout"
+      - "rate_limit_exceeded"
+    
+  - name: "deepseek-coder-v2"
+    base_url: "https://api.deepseek.com/v1/chat/completions"
+    api_key_env: DEEPSEEK_API_KEY
+    default_model: "deepseek-coder-v2.5"
+    cost_per_million_tokens: 0.15
+    max_requests_per_minute: 60
+    auto_fallback: true
+    fallback_on:
+      - "429"
+      - "503"
+      
+  - name: "qiniu-ark-pro"
+    base_url: "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+    api_key_env: QINIU_API_KEY
+    default_model: "qwq-plus-latest"  # Volcengine's Ark model
+    cost_per_million_tokens: 0.25
+    max_requests_per_minute: 120        # 3M tokens / ~12 mins = 20K/min ≈ 60 req/min for short prompts
+    auto_fallback: true
+    fallback_on:
+      - "429"
+      - "403"
+      - "5xx"
+    
+  - name: "glm-4-edge"
+    base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    api_key_env: GLM_API_KEY
+    default_model: "glm-4.6v"          # GLM-4.5-air for cost-sensitive tasks
+    cost_per_million_tokens: 0.35
+    max_requests_per_minute: 100
+    auto_fallback: true
+    fallback_on:
+      - "429"
+      - "5xx"
+    
+# Multi-Model Intelligent Routing Configuration
+model_router:
+  enabled: true
+  
+  # Auto-switch strategies
+  auto_switch:
+    on_error: fallback                    # Switch to next model on rate limit/error
+    on_think_time: scale_down             # Use smaller model if response > 5 seconds
+    latency_threshold_ms: 4000            # Trigger downgrade after 4s
+    
+  # Graceful degradation settings
+  graceful_degradation:
+    max_latency_ms: 5000                  # Auto-downgrade after 5s
+    cost_cap_per_minute: "$0.10"          # Drop to cheaper model beyond this
+    priority_models: ["google-ai-studio", "deepseek-coder-v2", "qiniu-ark-pro", "glm-4-edge"]
+    fallback_chain:
+      - primary: "google-ai-studio"
+        secondary: "deepseek-coder-v2"
+        tertiary: "glm-4-edge"
+        quaternary: "qiniu-ark-pro"
+  
+# Task-Type Based Model Selection
+model_router_tasks:
+  code_generation:                     # def, function, class, import, git commit
+    preferred_model: "deepseek-coder-v2"
+    fallback_to: ["glm-4-edge", "google-ai-studio"]
+    
+  creative_writing:                    # write story, poem, email, brainstorm
+    preferred_model: "google-ai-studio"
+    fallback_to: ["qiniu-ark-pro", "deepseek-coder-v2"]
+    
+  data_analysis:                       # calculate, formula, pandas, numpy
+    preferred_model: "glm-4-edge"
+    fallback_to: ["qiniu-ark-pro", "google-ai-studio"]
+    
+  mathematical_computation:            # solve equation, integral, theorem
+    preferred_model: "google-ai-studio"
+    fallback_to: ["deepseek-coder-v2"]
+    
+  translation:                         # translate to/from
+    preferred_model: "glm-4-edge"
+    fallback_to: ["qiniu-ark-pro"]
+    
+# Rate Limit Monitoring & Quota Management
+rate_limit_monitor:
+  enabled: true
+  check_interval_seconds: 300            # Check quota every 5 minutes
+  google_rate_limit_header: "x-goog-user-project"
+  max_google_requests_per_day: 1500      # Google's free tier daily limit (approx)
+  
+# Credential Pooling for Redundancy
+credential_pool_strategies:
+  rotate_on_error: true                  # Try next API key on failure
+  min_keys_per_provider: 2               # Keep at least 2 keys active per provider
+  expiration_warning_days: 7             # Warn before key expires
